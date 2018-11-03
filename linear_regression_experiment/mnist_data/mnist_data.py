@@ -9,16 +9,15 @@ class MnistData(object):
     def __init__(self):
         self.train_data, self.test_data = mnist.load_data()
         # Set placeholders for test and train data and for the batch size
-        self.x = tf.placeholder(tf.float32, shape=[None, 28, 28])
-        self.y = tf.placeholder(dtype=tf.int32, shape=[None])
-        self.batch_size = tf.placeholder(tf.int64)
-        # print(self._preprocess_labels(self.train_data[1]).shape)
+        with tf.name_scope('data'):
+            self.x = tf.placeholder(tf.float32, shape=[None, 28, 28])
+            self.y = tf.placeholder(dtype=tf.int32, shape=[None])
+        self.batch_size = tf.placeholder(tf.int64, name='batch_size')
+        with tf.name_scope('dataset'):
+            self.dataset = tf.data.Dataset.from_tensor_slices((self.x, self.y)).map(self.preprocess_data). \
+                shuffle(buffer_size=self.batch_size * 10).repeat().batch(self.batch_size)
 
-        self.dataset = tf.data.Dataset.from_tensor_slices((self.x, self.y)).map(self.preprocess_data). \
-            shuffle(buffer_size=self.batch_size * 4).repeat().batch(self.batch_size)
-
-        self.dataset_iterator = self.dataset.make_initializable_iterator()
-        print(self.dataset_iterator.get_next())
+            self.dataset_iterator = self.dataset.make_initializable_iterator()
 
     def get_data(self):
         return self.dataset_iterator.get_next()
