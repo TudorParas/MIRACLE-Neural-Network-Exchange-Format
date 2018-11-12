@@ -1,29 +1,31 @@
 import numpy as np
 import tensorflow as tf
-from tqdm import tqdm
 
 from linear_regression_experiment.toy_data.toy_data import ToyData
 
 # Data parameters
-SAMPLES = 60000
-ROWS = 10
-OUTPUTS = 2
+SAMPLES = 10000
+SLOPE = 2
 
 # Parameters for defining the graph
 DTYPE = tf.float32
-WEIGHT_DECAY = 5e-4
 LOG_INITIAL_SIGMA = -10.
-LOG_P_INITIAL_SIGMA = -1.
+LOG_P_INITIAL_SIGMA = 0
+TRAIN_P_SIGMA = False
+
+NUMPY_SEED = 53  # seed if we use a normally sampled vector
 
 # Training parameters
 BATCH_SIZE = 128
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 1e-2
 INITIAL_KL_PENALTY = 1e-08
-KL_PENALTY_STEP = 1.005  # Should be > 1
+KL_PENALTY_STEP = 1.0005  # Should be > 1
 
 # Logging parameters
 SUMMARIES_DIR = 'out/basic_miracle'
-MESSAGE_FREQUENCY = 1000  # output message this many iterations
+MESSAGE_FREQUENCY = 2000  # output message this many iterations
+
+np.random.seed(NUMPY_SEED)
 
 
 class BasicMiracle(object):
@@ -36,25 +38,22 @@ class BasicMiracle(object):
         compressed_size: int
             Size of the final compressed model in bits
         """
-        self.dataset = ToyData(samples=SAMPLES, rows=ROWS, num_outputs=OUTPUTS)
+        self.dataset = ToyData(samples=SAMPLES, slope=SLOPE)
         self.compressed_size = compressed_size
         self.kl_target = tf.constant(compressed_size * np.log(2), dtype=DTYPE)  # Transform from bits to nats.
         self.kl_penalty_step = KL_PENALTY_STEP  # How much we increase/decrease penalty if exceeding/not target KL
 
-        self.shape = [ROWS, OUTPUTS]
-
         self._create_graph()
-
         self._initialize_session()
 
     def _create_graph(self):
         """Create a graph of the linear regression matrix which we'll compress and the bias which we won't"""
         self.x, self.y = self.dataset.get_data()
         with tf.name_scope('Linear_regression'):
-            self.weight_matrix = self._create_linear_reg_matrix()
-            self.bias = tf.Variable(tf.random_normal(shape=[OUTPUTS]), "bias")
+            self.weight = self._create_w()
 
-            predictions = tf.matmul(self.x, self.weight_matrix) + self.bias
+            predictions = self.x * self.weight
+
         with tf.name_scope('Loss'):
             self._create_prior()
             self._create_kl_loss()
@@ -68,26 +67,30 @@ class BasicMiracle(object):
             no_scales_list = [v for v in tf.trainable_variables() if v is not self.p_scale_var]
             self.train_op_no_scales = optimizer.minimize(self.loss, var_list=no_scales_list)
 
+        with tf.name_scope('Compression'):
+            self._initialize_compressor()
+
     def _create_prior(self):
-        """ Create the "prior" and the shared source of randomness. The variance of the prior is trainable"""
+        """ Create the "prior" and the shared source of randomness. The log stddev of the prior is trainable"""
         with tf.name_scope('prior'):
-            self.p_scale_var = tf.Variable(LOG_INITIAL_SIGMA, dtype=DTYPE)
+            self.p_scale_var = tf.Variable(LOG_P_INITIAL_SIGMA, dtype=DTYPE, trainable=TRAIN_P_SIGMA)
             self.p_scale = tf.exp(self.p_scale_var)
             self.p = tf.distributions.Normal(loc=0., scale=self.p_scale)
 
-    def _create_linear_reg_matrix(self):
+    def _create_w(self):
         """Create a gaussian for each variable. Weigh their variance by their size"""
         with tf.name_scope("weights"):
-            # Mean of each variable
-            mu_init = np.random.normal(size=self.shape, loc=0., scale=np.sqrt(1. / self.shape[0]))
-            self.mu = tf.Variable(mu_init, dtype=DTYPE, name='mu')
-            # Variance for all weight blocks initilized to 1e-10. We want the exponenet to be the trained variable.
-            self.sigma_var = tf.Variable(tf.fill(self.shape, tf.cast(LOG_P_INITIAL_SIGMA, dtype=DTYPE)), name='sigma')
+            # Mean of the learned distribution
+            self.mu = tf.Variable(np.random.normal(), dtype=DTYPE, name='mu')
+            # Variance of the learned distribution initilized to 1e-10.
+            # We use log sigma as a Variable because we want sigma to always be positive
+            self.sigma_var = tf.Variable(tf.cast(LOG_P_INITIAL_SIGMA, dtype=DTYPE), trainable=TRAIN_P_SIGMA,
+                                         name='sigma')
             self.sigma = tf.exp(self.sigma_var)
 
-            variational_weights = tf.random_normal(self.shape, mean=self.mu, stddev=self.sigma)
+            variational_weight = tf.random_normal(shape=[1], mean=self.mu, stddev=self.sigma)
 
-            return variational_weights
+            return variational_weight
 
     def _create_kl_loss(self):
         """Create the KL loss which states how 'far away' our distribution is from the prior"""
@@ -118,12 +121,17 @@ class BasicMiracle(object):
         for i in range(iterations):
             self.sess.run(self.train_op)
 
+        print("Mu, sigma, loss: {}\n".format(self.sess.run([self.mu, self.sigma, self.loss])))
+
     def train(self, iterations):
         """Train until the kl converges at a value smaller than the target kl"""
         self.sess.run(self.enable_kl_loss.assign(1.))
+        # with tf.control_dependencies([self.train_op]):
+        #     kl_penalty_update = tf.identity(self.kl_penalty_update)
         for i in range(iterations):
             self._log_training(i)
             self.sess.run([self.train_op, self.kl_penalty_update])
+
 
     def _log_training(self, iteration):
         """Function called while training for logging"""
@@ -160,6 +168,41 @@ class BasicMiracle(object):
         # Revert back to train data
         self.dataset.initialize_train_data(self.sess, BATCH_SIZE)
 
+    def _initialize_compressor(self):
+        """Define the tensorflow nodes used during compression"""
+        # Generate a sequence of numbers sampled from a unit gaussian that we'll use to sample our prior
+        nr_of_samples = np.power(2, self.compressed_size)
+        sample_vector = self._get_normal_sample_vector(nr_of_samples)
+
+        sample_vector = tf.constant(sample_vector, dtype=DTYPE)
+        # Sample p using the sample vector. This means just multiplying it by p-s stf
+        self.p_sample = sample_vector * self.sigma
+        with tf.name_scope('probabilities'):
+            # Compute the probabilities of the sample for the p and q distributions
+            self.log_q_probs = tf.log(1 / tf.sqrt(2 * np.pi * tf.pow(self.sigma, 2))) - (
+                    tf.square(self.p_sample - self.mu) / (2 * tf.square(self.sigma))
+            )
+            self.log_p_probs = tf.log(1 / tf.sqrt(2 * np.pi * tf.square(self.p_scale))) - (
+                    tf.square(sample_vector) / 2
+            )
+
+        with tf.name_scope('sampling'):
+            # Create a Categorical distribution which we'll use for sampling.
+            # By using softmax we turn the log probabilities into actual probabilities
+            alphas = tf.nn.softmax(self.log_q_probs - self.log_p_probs)
+            cat_distr = tf.distributions.Categorical(probs=alphas)
+
+            self.chosen_seed = cat_distr.sample()
+            self.max_seed = tf.argmax(self.log_q_probs)  # Choose the value most like to have come from q
+
+            self.chosen_w = self.p_sample[self.chosen_seed]
+            self.max_w = self.p_sample[self.max_seed]
+
+    def _get_normal_sample_vector(self, samples):
+        sample_vector = np.random.normal(size=samples)
+
+        return sample_vector
+
     def _initialize_session(self):
         """Define the session"""
         config = tf.ConfigProto()
@@ -174,57 +217,56 @@ class BasicMiracle(object):
                                                   self.sess.graph)
 
     def _create_summaries(self):
-        tf.summary.scalar('Loss', self.loss)
-        tf.summary.scalar('KL', self.current_kl)
-        tf.summary.scalar('KL Penalty', self.kl_penalty)
-        tf.summary.scalar('KL Loss', self.kl_loss)
+        summaries = {'Loss': self.loss, 'KL': self.current_kl, 'KL Penalty': self.kl_penalty, 'KL Loss': self.kl_loss}
+        for name, summary in summaries.items():
+            tf.summary.scalar(name, summary)
 
         self.merged = tf.summary.merge_all()
 
     def compress(self, out_file=None):
         """Compress the linear regression matrix and store it in out_file"""
-        kl, scale = self.sess.run([self.current_kl, self.p_scale])
-        print("Starting compression with KL {0} bits, prior with scale {1}".format(kl / np.log(2), scale))
-        with tf.name_scope("Compressor"):
-            samples = int(np.power(2, self.compressed_size))
-            alphas = list()
-            for current_seed in tqdm(range(samples), desc="Trying samples"):
-                sample_w = self.p.sample(self.shape, seed=current_seed)
+        kl, scale, mu, sigma = self.sess.run([self.current_kl, self.p_scale, self.mu, self.sigma])
+        print("Starting compression with:\n"
+              "\t KL {0} bits\n"
+              "\t Prior with scale {1}\n"
+              "\t W_mu: {2}\n"
+              "\t W_sigma: {3}\n".format(
+            kl / np.log(2), scale, mu, sigma))
 
-                q_prob = tf.reduce_sum(self.w_dist.prob(sample_w))
-                p_prob = tf.reduce_sum(self.p.prob(sample_w))
-                sample_alpha = q_prob / p_prob
+        chosen_seed, chosen_w, max_seed, max_w, log_q_probs = self.sess.run(
+            [self.chosen_seed, self.chosen_w, self.max_seed, self.max_w, self.log_q_probs])
 
-                alphas.append(sample_alpha)
+        print("Compression finished with: \n"
+              "\t Chosen seed: {0}\n"
+              "\t Chosen w: {1}\n"
+              "\t Max seed: {2}\n"
+              "\t Max w: {3}\n"
+              "\t Log Q probs: {4}\n".format(chosen_seed, chosen_w, max_seed, max_w, log_q_probs))
 
-            alphas = np.array(self.sess.run(alphas))
-            probabilities = alphas / alphas.sum()
+        print("Testing the chosen w")
+        self._test_chosen_w(chosen_w)
+        print("Testing the max w")
+        self._test_chosen_w(max_w)
 
-            # chosen_seed = np.random.choice(samples, p=probabilities)  # Sample over the seeds with the probbilities
-            chosen_seed = np.argmax(probabilities)  # Pick the one with the highest probability
-            print("Chosen seed is {0} with probability {1}".format(chosen_seed, probabilities[chosen_seed]))
-            chosen_w = self.p.sample(self.shape, seed=chosen_seed)
-            print("Chosen w is :\n {0}".format(self.sess.run(chosen_w)))
-            self._test_chosen_w(chosen_w)
+        if out_file:
+            self._output_model_to_file(out_file, chosen_seed)
 
-            if out_file:
-                self._output_model_to_file(out_file, chosen_seed)
+        return chosen_seed, chosen_w, max_seed, max_w, log_q_probs, self.sess.run(self.p_sample)
 
     def _test_chosen_w(self, chosen_w):
         """Test how good it is the w we have chosen"""
-        print("Testing the chosen w")
         # Store the values so they can be reloaded
         tmp_mu, tmp_sigma_var = self.sess.run([self.mu, self.sigma_var])
         # Make the matrix deterministic by making sigma really low and mu equal to the chosen w
         self.sess.run([self.mu.assign(chosen_w),
-                       self.sigma_var.assign(tf.fill(self.shape, tf.cast(LOG_P_INITIAL_SIGMA, dtype=DTYPE)))])
+                       self.sigma_var.assign(tf.cast(LOG_INITIAL_SIGMA, dtype=DTYPE))])
         self.test(kl_loss=False)
         # Restore the values
         self.sess.run([self.mu.assign(tmp_mu),
                        self.sigma_var.assign(tmp_sigma_var)])
 
     def _output_model_to_file(self, out_file, chosen_seed):
-        """Output the compressed model to a .mrcl file"""
+        """Output the compressed model to a .mrcl file. This involves outputting the seed and the p scale."""
         pass
 
     def load_model(self, out_file):

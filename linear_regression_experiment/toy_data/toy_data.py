@@ -1,18 +1,28 @@
 """This file is meant to create the toy data for training"""
 
+import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
+from sklearn.model_selection import train_test_split
+
+RANDOM_SEED = 53
+LOWER_BOUND = -2
+UPPER_BOUND = 2
+SLOPE = 0.4
+
+np.random.seed(RANDOM_SEED)
 
 
 class ToyData(object):
-    def __init__(self, samples=60000, train_size=50000, rows=10, num_outputs=2, ):
-        input_data, output_data = create_data(samples, rows, num_outputs)
-        self.train_data = input_data[:train_size], output_data[:train_size]
-        self.test_data = input_data[train_size:], output_data[train_size:]
+    def __init__(self, samples=60000, test_size=0.1, slope=SLOPE):
+        self.slope = slope
+        input_data, output_data = self.create_data(samples, self.slope)
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(input_data, output_data,
+                                                                                test_size=test_size)
         # Set placeholders for test and train data and for the batch size
         with tf.name_scope('data'):
-            self.x = tf.placeholder(tf.float32, shape=[None, rows])
-            self.y = tf.placeholder(dtype=tf.float32, shape=[None, num_outputs])
+            self.x = tf.placeholder(tf.float32, shape=[None])
+            self.y = tf.placeholder(dtype=tf.float32, shape=[None])
         self.batch_size = tf.placeholder(tf.int64, name='batch_size')
         with tf.name_scope('dataset'):
             self.dataset = tf.data.Dataset.from_tensor_slices((self.x, self.y)). \
@@ -25,63 +35,49 @@ class ToyData(object):
 
     def initialize_train_data(self, sess, batch_size):
         """Initialize the dataset with the train data in a TensorFlow session"""
-        sess.run(self.dataset_iterator.initializer, feed_dict={self.x: self.train_data[0], self.y: self.train_data[1],
+        sess.run(self.dataset_iterator.initializer, feed_dict={self.x: self.X_train, self.y: self.y_train,
                                                                self.batch_size: batch_size})
 
     def initialize_test_data(self, sess):
         """Initialize the dataset with the test data in a TensorFlow session. Use the full batch"""
-        sess.run(self.dataset_iterator.initializer, feed_dict={self.x: self.test_data[0], self.y: self.test_data[1],
-                                                               self.batch_size: self.test_data[0].shape[0]})
+        sess.run(self.dataset_iterator.initializer, feed_dict={self.x: self.X_test, self.y: self.y_test,
+                                                               self.batch_size: self.X_test.shape[0]})
 
+    def plot_data(self, datapoints=500):
+        """Plot some of the training data"""
+        x_axis = self.X_train[:datapoints]
+        y_points = self.y_train[:datapoints]
+        fitted_line = x_axis * self.slope
 
+        fig, ax = plt.subplots()
+        ax.scatter(x_axis, y_points, label='Output points', alpha=0.2)
+        ax.plot(x_axis, fitted_line, label="True line", color='r')
+        # Stylistic changes
+        ax.grid(True, which='both')
 
+        ax.axhline(y=0, color='k')
+        ax.axvline(x=0, color='k')
+        ax.legend()
 
-def create_data(samples=1000, rows=10, num_outputs=None):
-    """
-    Create toy data consisting of
+    def create_data(self, samples, slope):
+        """
+        Create toy data. The input is the input with gaussian noise added to it
 
-    Parameters:
-        samples: int
-            Number of input-output pairs
-        rows: int
-            Number of rows of the input and of the output
-        num_outputs: int
-            Number of outputs we want
-    Returns:
-        tuple
-            Tuple of array of input vectors and array of output vectors
-    """
+        Parameters:
+            samples: int
+                Number of input-output pairs
+            slope: int
+                The slope we'll try to learn during training
+        Returns:
+            tuple
+                Tuple of array of input vectors and array of output vectors
+        """
 
-    input_data = np.random.random(size=(samples, rows))
-    output_data = create_output_data(input_data, num_outputs)
+        input_data = np.random.uniform(low=LOWER_BOUND, high=UPPER_BOUND, size=samples)
+        output_data = input_data * slope + np.random.normal(size=samples, scale=self.slope / 4)
 
-    return input_data, output_data
+        return input_data, output_data
 
-
-def _sum_max_function(vector):
-    """Given a numpy array return a numpy array of its sum and its average"""
-    return np.array([vector.sum(), vector.mean()])
-
-
-def _avg_function(vector):
-    """Just return the sum"""
-    return np.array([vector.mean()])
-
-
-def create_output_data(input_data, num_outputs):
-    """
-    Create the output data by appying the function to all the output data
-
-    Parameters:
-        input_data: np.array
-        func: np.array -> np.array
-
-    Returns:
-        np.array
-            Apply func to each input vector
-    """
-    if num_outputs == 1:
-        func = _avg_function
-    else:
-        func = _sum_max_function
-    return np.array(list(map(func, input_data)))
+# t= ToyData()
+# t.plot_data()
+# plt.show()

@@ -2,31 +2,30 @@ import tensorflow as tf
 
 from linear_regression_experiment.toy_data.toy_data import ToyData
 
-SAMPLES = 60000
-ROWS = 10
-OUTPUTS = 2
+SAMPLES = 10000
+SLOPE = 0.5
 
-BATCH_SIZE = 128
-LEARNING_RATE = 1e-3
-ITERATIONS = 4000
+INITIAL_W_VALUE = 0
+BATCH_SIZE = 64
+LEARNING_RATE = 1e-2
+ITERATIONS = 300
 
 SUMMARIES_DIR = 'out/classic_linear'
 
-dataset = ToyData(samples=SAMPLES, rows=ROWS, num_outputs=OUTPUTS)
+dataset = ToyData(samples=SAMPLES, slope=SLOPE)
 
 x, y = dataset.get_data()
 
 with tf.name_scope('Linear_regression'):
-    W = tf.Variable(tf.random_normal(shape=[ROWS, OUTPUTS]), "linear_matrix")
-    bias = tf.Variable(tf.random_normal(shape=[OUTPUTS]), "bias")
+    W = tf.Variable(tf.random_normal([1]), dtype=tf.float32, name="W")
 
-    predictions = tf.matmul(x, W) + bias
+    predictions = x * W
 
 with tf.name_scope('Loss'):
     loss = tf.reduce_mean(tf.square(predictions - y))
 
 with tf.name_scope('Training'):
-    train_op = tf.train.AdamOptimizer(LEARNING_RATE).minimize(loss)
+    train_op = tf.train.GradientDescentOptimizer(LEARNING_RATE).minimize(loss)
 
 with tf.Session() as sess:
     sess.run(tf.global_variables_initializer())
@@ -38,14 +37,14 @@ with tf.Session() as sess:
     for i in range(ITERATIONS):
         loss_amount, _ = sess.run(fetches=[loss, train_op])
 
-        if i % 500 == 0:
+        if i % 100 == 0:
             print("Loss at iteration {0} is {1}".format(i, loss_amount))
 
     # Test data
         dataset.initialize_test_data(sess)
 
-    predicted, expected = sess.run(fetches=[predictions, y])
+    fitted_w = sess.run(fetches=W)
 
-    print("Expected values: {0}".format(expected))
-    print("Predicted values: {0}".format(predicted))
+    print("Expected W: {0}".format(SLOPE))
+    print("Fitted W: {0}".format(fitted_w[0]))
 
