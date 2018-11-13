@@ -11,15 +11,15 @@ SLOPE = 2
 DTYPE = tf.float32
 LOG_INITIAL_SIGMA = -10.
 LOG_P_INITIAL_SIGMA = 0
-TRAIN_P_SIGMA = False
+TRAIN_P_SIGMA = True
 
-NUMPY_SEED = 53  # seed if we use a normally sampled vector
+NUMPY_SEED = 2  # seed if we use a normally sampled vector
 
 # Training parameters
 BATCH_SIZE = 128
 LEARNING_RATE = 1e-2
 INITIAL_KL_PENALTY = 1e-08
-KL_PENALTY_STEP = 1.0005  # Should be > 1
+KL_PENALTY_STEP = 1.005  # Should be > 1
 
 # Logging parameters
 SUMMARIES_DIR = 'out/basic_miracle'
@@ -47,7 +47,7 @@ class BasicMiracle(object):
         self._initialize_session()
 
     def _create_graph(self):
-        """Create a graph of the linear regression matrix which we'll compress and the bias which we won't"""
+        """Create a graph of the model"""
         self.x, self.y = self.dataset.get_data()
         with tf.name_scope('Linear_regression'):
             self.weight = self._create_w()
@@ -78,14 +78,13 @@ class BasicMiracle(object):
             self.p = tf.distributions.Normal(loc=0., scale=self.p_scale)
 
     def _create_w(self):
-        """Create a gaussian for each variable. Weigh their variance by their size"""
+        """Create a gaussian that is our weight"""
         with tf.name_scope("weights"):
             # Mean of the learned distribution
             self.mu = tf.Variable(np.random.normal(), dtype=DTYPE, name='mu')
             # Variance of the learned distribution initilized to 1e-10.
             # We use log sigma as a Variable because we want sigma to always be positive
-            self.sigma_var = tf.Variable(tf.cast(LOG_P_INITIAL_SIGMA, dtype=DTYPE), trainable=TRAIN_P_SIGMA,
-                                         name='sigma')
+            self.sigma_var = tf.Variable(tf.cast(LOG_INITIAL_SIGMA, dtype=DTYPE), name='sigma')
             self.sigma = tf.exp(self.sigma_var)
 
             variational_weight = tf.random_normal(shape=[1], mean=self.mu, stddev=self.sigma)
@@ -121,7 +120,13 @@ class BasicMiracle(object):
         for i in range(iterations):
             self.sess.run(self.train_op)
 
-        print("Mu, sigma, loss: {}\n".format(self.sess.run([self.mu, self.sigma, self.loss])))
+        kl, scale, mu, sigma = self.sess.run([self.current_kl, self.p_scale, self.mu, self.sigma])
+        print("Finished pretraining with:\n"
+              "\t KL {0} bits\n"
+              "\t Prior with scale {1}\n"
+              "\t W_mu: {2}\n"
+              "\t W_sigma: {3}\n".format(
+            kl / np.log(2), scale, mu, sigma))
 
     def train(self, iterations):
         """Train until the kl converges at a value smaller than the target kl"""
@@ -131,7 +136,6 @@ class BasicMiracle(object):
         for i in range(iterations):
             self._log_training(i)
             self.sess.run([self.train_op, self.kl_penalty_update])
-
 
     def _log_training(self, iteration):
         """Function called while training for logging"""
@@ -176,7 +180,7 @@ class BasicMiracle(object):
 
         sample_vector = tf.constant(sample_vector, dtype=DTYPE)
         # Sample p using the sample vector. This means just multiplying it by p-s stf
-        self.p_sample = sample_vector * self.sigma
+        self.p_sample = sample_vector * self.p_scale
         with tf.name_scope('probabilities'):
             # Compute the probabilities of the sample for the p and q distributions
             self.log_q_probs = tf.log(1 / tf.sqrt(2 * np.pi * tf.pow(self.sigma, 2))) - (
@@ -239,21 +243,18 @@ class BasicMiracle(object):
         print("Compression finished with: \n"
               "\t Chosen seed: {0}\n"
               "\t Chosen w: {1}\n"
+              "\t Chosen w log probability: {4}\n"
               "\t Max seed: {2}\n"
               "\t Max w: {3}\n"
-              "\t Log Q probs: {4}\n".format(chosen_seed, chosen_w, max_seed, max_w, log_q_probs))
+              "\t Max w log probability: {5}\n".format(
+            chosen_seed, chosen_w, max_seed, max_w, log_q_probs[chosen_seed], log_q_probs[max_seed]))
 
         print("Testing the chosen w")
-        self._test_chosen_w(chosen_w)
+        self._test_w(chosen_w)
         print("Testing the max w")
-        self._test_chosen_w(max_w)
+        self._test_w(max_w)
 
-        if out_file:
-            self._output_model_to_file(out_file, chosen_seed)
-
-        return chosen_seed, chosen_w, max_seed, max_w, log_q_probs, self.sess.run(self.p_sample)
-
-    def _test_chosen_w(self, chosen_w):
+    def _test_w(self, chosen_w):
         """Test how good it is the w we have chosen"""
         # Store the values so they can be reloaded
         tmp_mu, tmp_sigma_var = self.sess.run([self.mu, self.sigma_var])
@@ -264,11 +265,3 @@ class BasicMiracle(object):
         # Restore the values
         self.sess.run([self.mu.assign(tmp_mu),
                        self.sigma_var.assign(tmp_sigma_var)])
-
-    def _output_model_to_file(self, out_file, chosen_seed):
-        """Output the compressed model to a .mrcl file. This involves outputting the seed and the p scale."""
-        pass
-
-    def load_model(self, out_file):
-        """Load the compressed model from the .mrcl file"""
-        pass
