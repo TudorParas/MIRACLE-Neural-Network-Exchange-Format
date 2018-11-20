@@ -7,21 +7,24 @@ from linear_regression_experiment.mnist_data.mnist_data import MnistData
 DTYPE = tf.float32
 LOG_INITIAL_SIGMA = -10.
 LOG_P_INITIAL_SIGMA = 0
-TRAIN_P_SIGMA = True
-DIMENSION = [784, 10]  # Dimenstion of the linear regression matrix before any block or hashing tricks.
+TRAIN_P_SIGMA = False
+DIMENSION = [784, 10]  # Dimension of the linear regression matrix before any block or hashing tricks.
 NUMPY_SEED = 53  # Used for deterministic generating of permutations and of samples. Needed for loading
 
 # Training parameters
 BATCH_SIZE = 128
-LEARNING_RATE = 1e-2
+LEARNING_RATE = 1e-3
 INITIAL_KL_PENALTY = 1e-08
-KL_PENALTY_STEP = 1.00005  # Should be > 1
+KL_PENALTY_STEP = 1.0002  # Should be > 1
 
 # Logging parameters
 SUMMARIES_DIR = 'out/miracle'
-MESSAGE_FREQUENCY = 2000  # output message this many iterations
+MESSAGE_FREQUENCY = 1000  # output message this many iterations
 
 np.random.seed(NUMPY_SEED)
+
+# Debugging parameters
+WEIGHTS_TO_SHOW = 4
 
 
 class MnistMiracle(object):
@@ -56,12 +59,20 @@ class MnistMiracle(object):
         with tf.name_scope('Linear_regression'):
             self.weight = self._create_w()
             self.bias = tf.Variable(initial_value=0.)  # Do not compress the bias in order to keep things simple
-            predictions = tf.matmul(x, self.weight) + self.bias
+            print(self.weight.shape)
+            logits = tf.matmul(x, self.weight) + self.bias
 
         with tf.name_scope('Loss'):
             self._create_prior()
             self._create_kl_loss()
-            self.loss = tf.reduce_mean(tf.square(predictions - y)) + self.kl_loss
+            self.loss = tf.reduce_mean(
+                tf.nn.softmax_cross_entropy_with_logits_v2(logits=logits, labels=y)) + self.kl_loss
+
+        with tf.name_scope('accuracy'):
+            with tf.name_scope('correct_prediction'):
+                correct_pred = tf.equal(tf.argmax(logits, 1), tf.argmax(y, 1))
+            with tf.name_scope('accuracy'):
+                self.accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
 
         with tf.name_scope('Training'):
             optimizer = tf.train.AdamOptimizer(LEARNING_RATE)
@@ -89,7 +100,6 @@ class MnistMiracle(object):
 
                 # Mean of the learned distribution
                 self.mu = tf.Variable(permutted_mu_init, dtype=DTYPE, name='mu')
-                print("Mu shape: {}".format(self.mu.shape))
 
             with tf.name_scope("Sigma"):
                 sigma_init = tf.fill(self.shape, tf.cast(LOG_INITIAL_SIGMA, dtype=DTYPE))
@@ -124,16 +134,14 @@ class MnistMiracle(object):
                 permuted_weights = tf.gather(combined_weights, self.permutation_inv, name='permuted_weights')
                 # Get only the actual weights, no padding
                 actual_weights = permuted_weights[:self.num_actual_vars]
-                print("Actual weights shape: {}".format(actual_weights.shape))
-                print("Expanded actual weights shape: {}".format(tf.expand_dims(actual_weights, axis=1).shape))
                 # Undo the hashing trick, expanding the weights into the dimensions
                 # ToDo experiment with multiplying with random.choice([-1, 1]) instead of just ones.
                 flattened_weights = tf.multiply(tf.expand_dims(actual_weights, axis=1),
                                                 np.ones(shape=self.hash_group_size_vars),
                                                 name='flattened_weights')
-                weights = tf.reshape(flattened_weights, DIMENSION, name='weights')
+                self.restored_weights = tf.reshape(flattened_weights, DIMENSION, name='weights')
 
-        return weights
+        return self.restored_weights
 
     def _create_w_metainformation(self):
         """Create variables that will help in defining w"""
@@ -194,22 +202,32 @@ class MnistMiracle(object):
         self.sess.run(self.enable_kl_loss.assign(0.))
         for i in range(iterations):
             self.sess.run(self.train_op)
+            accuracy, _ = self.sess.run([self.accuracy, self.train_op])
+            if i % MESSAGE_FREQUENCY == 0:
+                print("Pretrain accuracy at iteration {}: {}".format(i, accuracy))
+                self.test(kl_loss=False)
 
-        kl, scale, mu, sigma = self.sess.run([self.current_kl, self.p_scale, self.mu, self.sigma])
+        mean_kl, scale, accuracy = self.sess.run([self.mean_kl, self.p_scale, self.accuracy])
         print("Finished pretraining with:\n"
-              "\t KL {0} bits\n"
+              "\t Mean KL {0} bits\n"
               "\t Prior with scale {1}\n"
-              "\t W_mu: {2}\n"
-              "\t W_sigma: {3}\n".format(
-            kl / np.log(2), scale, mu, sigma))
+              "\t Accuracy: {2}".format(
+            mean_kl / np.log(2), scale, accuracy))
 
-    def train(self, iterations):
+    def _show_weights(self):
+        print("Mu: \n{}".format(self.sess.run(self.mu)[:WEIGHTS_TO_SHOW, :WEIGHTS_TO_SHOW]))
+        print("Sigma: \n{}".format(self.sess.run(self.sigma)[:WEIGHTS_TO_SHOW, :WEIGHTS_TO_SHOW]))
+        print("Variational: \n{}".format(self.sess.run(self.variational_weights)[:WEIGHTS_TO_SHOW, :WEIGHTS_TO_SHOW]))
+        print("Restored: \n{}".format(self.sess.run(self.restored_weights)[:WEIGHTS_TO_SHOW, :WEIGHTS_TO_SHOW]))
+
+    def train(self, iterations, verbose=True):
         """Train until the kl converges at a value smaller than the target kl"""
         self.sess.run(self.enable_kl_loss.assign(1.))
         # with tf.control_dependencies([self.train_op]):
         #     kl_penalty_update = tf.identity(self.kl_penalty_update)
         for i in range(iterations):
-            self._log_training(i)
+            if verbose:
+                self._log_training(i)
             self.sess.run([self.train_op, self.kl_penalty_update])
 
     def _log_training(self, iteration):
@@ -219,50 +237,63 @@ class MnistMiracle(object):
         self.train_writer.add_summary(summaries, iteration)
 
         if iteration % MESSAGE_FREQUENCY == 0:
-            loss, kl, kl_penalty, kl_loss = self.sess.run([self.loss, self.current_kl, self.kl_penalty, self.kl_loss])
-
             print("Iteration {0} ".format(iteration), end='\n\n')
+
+            loss, mean_kl, accuracy = self.sess.run([self.loss, self.mean_kl, self.accuracy])
             print("Training Data: \n"
-                  "Loss--{0}, KL--{1}, KL penalty--{2}, KL loss--{3}".format(loss, kl, kl_penalty, kl_loss))
+                  "Loss--{0}, Mean KL--{1}, Accuracy--{2}".format(loss, mean_kl, accuracy),
+                  end='\n\n')
 
             self.test()
 
     def test(self, kl_loss=True):
         self.dataset.initialize_test_data(self.sess)
+        tmp_enable = self.sess.run(self.enable_kl_loss)
         if kl_loss:
-            loss, kl, kl_penalty, kl_loss = self.sess.run([self.loss, self.current_kl, self.kl_penalty, self.kl_loss])
+            self.sess.run(self.enable_kl_loss.assign(1.))
+            loss, mean_kl, accuracy = self.sess.run([self.loss, self.mean_kl, self.accuracy])
 
             print("Test Data: \n"
-                  "Loss--{0}, KL--{1}, KL penalty--{2}, KL loss--{3}".format(loss, kl, kl_penalty, kl_loss),
+                  "Loss--{0}, Mean KL--{1}, Accuracy--{2}".format(loss, mean_kl, accuracy),
                   end='\n\n')
         else:
-            tmp_enable, _ = self.sess.run([self.enable_kl_loss, self.enable_kl_loss.assign(0.)])
-            loss = self.sess.run(self.loss)  #
+            self.sess.run(self.enable_kl_loss.assign(0.))
+            loss, accuracy = self.sess.run([self.loss, self.accuracy])  #
 
             print("Test Data: \n"
-                  "Loss--{0}".format(loss),
+                  "Loss--{0}, Accuracy--{1}".format(loss, accuracy),
                   end='\n\n')
-            self.sess.run(self.enable_kl_loss.assign(tmp_enable))
 
+        # Restore the enable_kl_loss
+        self.sess.run(self.enable_kl_loss.assign(tmp_enable))
         # Revert back to train data
         self.dataset.initialize_train_data(self.sess, BATCH_SIZE)
 
     def _initialize_compressor(self):
         """Define the tensorflow nodes used during compression"""
         # Generate a sequence of numbers sampled from a unit gaussian that we'll use to sample our prior
-        nr_of_samples = np.power(2, self.compressed_size_bits)
-        sample_vector = self._get_normal_sample_vector(nr_of_samples)
-        sample_vector = tf.constant(sample_vector, dtype=DTYPE)
-        # Sample p using the sample vector. This means just multiplying it by p-s stf
-        self.p_sample = sample_vector * self.p_scale
+        self.block_to_compress_index = tf.placeholder(tf.int32)
+
+        sample_block = self._get_normal_sample_block()  # use this block to sample
+        sample_vector = tf.constant(sample_block, dtype=DTYPE)
+        with tf.name_scope('block_info'):
+            # Sample p using the sample vector. This means just multiplying it by p-s stf
+            self.p_sample = sample_vector * self.p_scale
+            # Get the mu and sigma for this block
+            block_mu = self.mu[self.block_to_compress_index, :]
+            block_sigma = self.sigma[self.block_to_compress_index, :]
+
         with tf.name_scope('probabilities'):
             # Compute the probabilities of the sample for the p and q distributions
-            self.log_q_probs = tf.log(1 / tf.sqrt(2 * np.pi * tf.pow(self.sigma, 2))) - (
-                    tf.square(self.p_sample - self.mu) / (2 * tf.square(self.sigma))
-            )
-            self.log_p_probs = tf.log(1 / tf.sqrt(2 * np.pi * tf.square(self.p_scale))) - (
+            self.log_q_probs = tf.reduce_sum(
+                tf.log(1 / tf.sqrt(2 * np.pi * tf.pow(block_sigma, 2))) - (
+                        tf.square(self.p_sample - block_mu) / (2 * tf.square(block_sigma))
+                ),
+                axis=1)
+            self.log_p_probs = tf.reduce_sum(tf.log(1 / tf.sqrt(2 * np.pi * tf.square(self.p_scale))) - (
                     tf.square(sample_vector) / 2
-            )
+            ),
+                                             axis=1)
 
         with tf.name_scope('sampling'):
             # Create a Categorical distribution which we'll use for sampling.
@@ -271,15 +302,23 @@ class MnistMiracle(object):
             cat_distr = tf.distributions.Categorical(probs=alphas)
 
             self.chosen_seed = cat_distr.sample()
-            self.max_seed = tf.argmax(self.log_q_probs)  # Choose the value most like to have come from q
+            # self.chosen_seed = tf.argmax(self.log_q_probs)  # Choose the value most like to have come from q
+            self.chosen_sample = self.p_sample[self.chosen_seed, :]
 
-            self.chosen_w = self.p_sample[self.chosen_seed]
-            self.max_w = self.p_sample[self.max_seed]
+        with tf.name_scope('compression_operations'):
+            # Update the fixed weights and the mask
+            self.fixed_weights_update = tf.scatter_update(ref=self.fixed_weights,
+                                                          indices=[self.block_to_compress_index],
+                                                          updates=[self.chosen_sample],
+                                                          name='fixed_weights_update')
+            self.mask_update = tf.scatter_update(ref=self.uncompressed_mask, indices=[self.block_to_compress_index],
+                                                 updates=[0.], name='mask_update')
 
-    def _get_normal_sample_vector(self, samples):
-        sample_vector = np.random.normal(size=samples)
+    def _get_normal_sample_block(self):
+        samples = np.power(2, self.bits_per_block)  # total nr of samples we consider
+        sample_block = np.random.normal(size=[samples, self.block_size_vars])
 
-        return sample_vector
+        return sample_block
 
     def _initialize_session(self):
         """Define the session"""
@@ -295,50 +334,35 @@ class MnistMiracle(object):
                                                   self.sess.graph)
 
     def _create_summaries(self):
-        summaries = {'Loss': self.loss, 'KL': self.current_kl, 'KL Penalty': self.kl_penalty, 'KL Loss': self.kl_loss}
+        summaries = {'Loss': self.loss, 'Mean_KL': self.mean_kl, 'KL Loss': self.kl_loss, "Accuracy": self.accuracy}
         for name, summary in summaries.items():
             tf.summary.scalar(name, summary)
 
         self.merged = tf.summary.merge_all()
 
-    def compress(self, out_file=None):
-        """Compress the linear regression matrix and store it in out_file"""
-        kl, scale, mu, sigma = self.sess.run([self.current_kl, self.p_scale, self.mu, self.sigma])
+    def compress(self, retrain_iter, out_file=None):
+        """Compress the linear regression matrix and store it in out_file
+
+        Parameters
+        ----------
+        retrain_iter: int
+            For how many iterations we retrain after each block is compressed
+        out_file: str
+            Where to output the compressed model
+        """
+        mean_kl, scale = self.sess.run([self.mean_kl, self.p_scale])
         print("Starting compression with:\n"
-              "\t KL {0} bits\n"
-              "\t Prior with scale {1}\n"
-              "\t W_mu: {2}\n"
-              "\t W_sigma: {3}\n".format(
-            kl / np.log(2), scale, mu, sigma))
+              "\t Mean KL {0} bits\n"
+              "\t Prior with scale {1}\n".format(
+            mean_kl / np.log(2), scale))
 
-        chosen_seed, chosen_w, max_seed, max_w, log_q_probs = self.sess.run(
-            [self.chosen_seed, self.chosen_w, self.max_seed, self.max_w, self.log_q_probs])
+        self.sess.run(self.enable_kl_loss.assign(1.))
+        for block_index in range(self.num_blocks):
+            self.sess.run([self.fixed_weights_update, self.mask_update],
+                          feed_dict={self.block_to_compress_index: block_index})
 
-        print("Compression finished with: \n"
-              "\t Chosen seed: {0}\n"
-              "\t Chosen w: {1}\n"
-              "\t Chosen w log probability: {4}\n"
-              "\t Max seed: {2}\n"
-              "\t Max w: {3}\n"
-              "\t Max w log probability: {5}\n".format(
-            chosen_seed, chosen_w, max_seed, max_w, log_q_probs[chosen_seed], log_q_probs[max_seed]))
+            print('Block {0} of {1} compressed'.format(block_index, self.num_blocks))
+            print('Retraining for {} iterations'.format(retrain_iter))
+            self.train(iterations=retrain_iter, verbose=False)
 
-        print("Testing the chosen w")
-        self._test_w(chosen_w)
-        print("Testing the max w")
-        self._test_w(max_w)
-
-    def _test_w(self, chosen_w):
-        """Test how good it is the w we have chosen"""
-        # Store the values so they can be reloaded
-        tmp_mu, tmp_sigma_var = self.sess.run([self.mu, self.sigma_var])
-        # Make the matrix deterministic by making sigma really low and mu equal to the chosen w
-        self.sess.run([self.mu.assign(chosen_w),
-                       self.sigma_var.assign(tf.cast(LOG_INITIAL_SIGMA, dtype=DTYPE))])
-        self.test(kl_loss=False)
-        # Restore the values
-        self.sess.run([self.mu.assign(tmp_mu),
-                       self.sigma_var.assign(tmp_sigma_var)])
-
-
-MnistMiracle(compressed_size_bits=2 ** 10, block_size_vars=8, hash_group_size_vars=8)
+            self.test(kl_loss=True)
