@@ -1,10 +1,10 @@
 import os
-import pickle as pkl
 
 import numpy as np
 import tensorflow as tf
 
 from linear_regression_experiment.mnist_data.mnist_data import MnistData
+from utils.file_io import dump_to_file, load_from_file
 
 # Parameters for defining the graph
 DTYPE = tf.float32
@@ -401,16 +401,10 @@ class MnistMiracle(object):
 
             self.test(kl_loss=True)
 
-        self._dump_to_file(chosen_seeds, out_name)
-
-    def _dump_to_file(self, seeds, out_name):
-        """Dump the compression to the output file."""
         p_scale_var = self.sess.run(self.p_scale_var)
-        dump = {'p_scale_var': p_scale_var,
-                'seeds': seeds}
         out_file = os.path.join(self.out_dir, out_name)
-        with open(out_file, mode='wb+') as f:
-            pkl.dump(dump, f)
+        dump_to_file(p_scale_vars=[p_scale_var], seeds=chosen_seeds, bits_per_block=self.bits_per_block,
+                     out_file=out_file)
 
     def load_model(self, model_file):
         """Load the model from the file. This involves:
@@ -430,6 +424,6 @@ class MnistMiracle(object):
 
     def _get_from_file(self, model_file):
         """Get the seeds and the pscale from file"""
-        with open(model_file, mode='rb') as f:
-            model = pkl.load(f)
-        return model['p_scale_var'], model['seeds']
+        p_scale_vars, seeds = load_from_file(model_file, bits_per_block=self.bits_per_block, p_scale_number=1,
+                                             seeds_number=self.num_blocks)
+        return p_scale_vars[0], seeds
