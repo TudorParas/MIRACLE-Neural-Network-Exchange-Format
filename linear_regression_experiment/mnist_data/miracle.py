@@ -1,3 +1,6 @@
+import os
+import pickle as pkl
+
 import numpy as np
 import tensorflow as tf
 
@@ -28,24 +31,31 @@ WEIGHTS_TO_SHOW = 4
 
 
 class MnistMiracle(object):
-    def __init__(self, bits_per_block, block_size_vars, hash_group_size_vars):
+    def __init__(self, bits_per_block, block_size_vars, hash_group_size_vars, out_dir=None):
         """
         Define the graph for doing linear regression using the basic algorithm
 
         Parameters
         ----------
-        compressed_size_bits: int
-            Size of the final compressed model in bits
+        bits_per_block: int
+            Bits we allocate for each block
         block_size_vars: int
             How many variables there'll be in a block
-        hash_group_size_vars:
+        hash_group_size_vars: int
             How many variables we set to have the same value. Atm it is a divisor of nr of vars in uncompressed model
+        out_dir: str
+            Where do we store the compressed models
         """
         self.dataset = MnistData()
 
         self.bits_per_block = bits_per_block
         self.block_size_vars = block_size_vars
         self.hash_group_size_vars = hash_group_size_vars
+        self.out_dir = out_dir
+        try:
+            os.makedirs(out_dir)
+        except FileExistsError:
+            pass
 
         self.kl_block_target = tf.constant(bits_per_block * np.log(2), dtype=DTYPE)  # Transform from bits to nats.
         self.kl_penalty_step = KL_PENALTY_STEP  # How much we increase/decrease penalty if exceeding/not target KL
@@ -59,7 +69,6 @@ class MnistMiracle(object):
         with tf.name_scope('Linear_regression'):
             self.weight = self._create_w()
             self.bias = tf.Variable(initial_value=0.)  # Do not compress the bias in order to keep things simple
-            print(self.weight.shape)
             logits = tf.matmul(x, self.weight) + self.bias
 
         with tf.name_scope('Loss'):
@@ -82,8 +91,12 @@ class MnistMiracle(object):
             no_scales_list = [v for v in tf.trainable_variables() if v is not self.p_scale_var]
             self.train_op_no_scales = optimizer.minimize(self.loss, var_list=no_scales_list)
 
+        with tf.name_scope('P_Sample'):
+            self._generate_p_sample()
         with tf.name_scope('Compression'):
             self._initialize_compressor()
+        with tf.name_scope('Loader'):
+            self._initialize_loader()
 
     def _create_w(self):
         """Create a gaussian for each variable. Weigh their variance by their size"""
@@ -271,14 +284,8 @@ class MnistMiracle(object):
 
     def _initialize_compressor(self):
         """Define the tensorflow nodes used during compression"""
-        # Generate a sequence of numbers sampled from a unit gaussian that we'll use to sample our prior
         self.block_to_compress_index = tf.placeholder(tf.int32)
-
-        sample_block = self._get_normal_sample_block()  # use this block to sample
-        sample_vector = tf.constant(sample_block, dtype=DTYPE)
         with tf.name_scope('block_info'):
-            # Sample p using the sample vector. This means just multiplying it by p-s stf
-            self.p_sample = sample_vector * self.p_scale
             # Get the mu and sigma for this block
             block_mu = self.mu[self.block_to_compress_index, :]
             block_sigma = self.sigma[self.block_to_compress_index, :]
@@ -291,7 +298,7 @@ class MnistMiracle(object):
                 ),
                 axis=1)
             self.log_p_probs = tf.reduce_sum(tf.log(1 / tf.sqrt(2 * np.pi * tf.square(self.p_scale))) - (
-                    tf.square(sample_vector) / 2
+                    tf.square(self.sample_block) / 2
             ),
                                              axis=1)
 
@@ -314,11 +321,36 @@ class MnistMiracle(object):
             self.mask_update = tf.scatter_update(ref=self.uncompressed_mask, indices=[self.block_to_compress_index],
                                                  updates=[0.], name='mask_update')
 
+    def _generate_p_sample(self):
+        """Generate the block sample from p that we'll use for all the compression"""
+        sample_block = self._get_normal_sample_block()  # use this block to sample
+        self.sample_block = tf.constant(sample_block, dtype=DTYPE)
+        # Sample p using the sample vector. This means just multiplying it by p-s stf
+        self.p_sample = sample_block * self.p_scale
+
     def _get_normal_sample_block(self):
         samples = np.power(2, self.bits_per_block)  # total nr of samples we consider
         sample_block = np.random.normal(size=[samples, self.block_size_vars])
 
         return sample_block
+
+    def _initialize_loader(self):
+        """Create the graph that will load model from file"""
+        self.loaded_p_scale_var = tf.placeholder(DTYPE)
+        self.loaded_block_index = tf.placeholder(tf.int32)
+        self.loaded_block_seed = tf.placeholder(tf.int32)
+        # Load the required p_scale to get the proper block
+        self.load_p_scale = tf.assign(self.p_scale_var, self.loaded_p_scale_var)
+        # Get the needed block
+        loaded_block = self.p_sample[self.loaded_block_seed, :]
+        # Update the fixed weights for this block
+        self.load_block = tf.scatter_update(ref=self.fixed_weights,
+                                            indices=[self.loaded_block_index],
+                                            updates=[loaded_block],
+                                            name='load_block')
+        # Make the mask indicate that this is now a compressed block.
+        self.load_mask_update = tf.scatter_update(ref=self.uncompressed_mask, indices=[self.loaded_block_index],
+                                                  updates=[0.], name='load_mask_update')
 
     def _initialize_session(self):
         """Define the session"""
@@ -340,15 +372,15 @@ class MnistMiracle(object):
 
         self.merged = tf.summary.merge_all()
 
-    def compress(self, retrain_iter, out_file=None):
+    def compress(self, retrain_iter, out_name):
         """Compress the linear regression matrix and store it in out_file
 
         Parameters
         ----------
         retrain_iter: int
             For how many iterations we retrain after each block is compressed
-        out_file: str
-            Where to output the compressed model
+        out_name: str
+            Name of the file containing the compressed model
         """
         mean_kl, scale = self.sess.run([self.mean_kl, self.p_scale])
         print("Starting compression with:\n"
@@ -357,12 +389,47 @@ class MnistMiracle(object):
             mean_kl / np.log(2), scale))
 
         self.sess.run(self.enable_kl_loss.assign(1.))
+        chosen_seeds = list()
         for block_index in range(self.num_blocks):
-            self.sess.run([self.fixed_weights_update, self.mask_update],
-                          feed_dict={self.block_to_compress_index: block_index})
+            block_seed, _, _ = self.sess.run([self.chosen_seed, self.fixed_weights_update, self.mask_update],
+                                             feed_dict={self.block_to_compress_index: block_index})
+            chosen_seeds.append(block_seed)
 
             print('Block {0} of {1} compressed'.format(block_index, self.num_blocks))
             print('Retraining for {} iterations'.format(retrain_iter))
             self.train(iterations=retrain_iter, verbose=False)
 
             self.test(kl_loss=True)
+
+        self._dump_to_file(chosen_seeds, out_name)
+
+    def _dump_to_file(self, seeds, out_name):
+        """Dump the compression to the output file."""
+        p_scale_var = self.sess.run(self.p_scale_var)
+        dump = {'p_scale_var': p_scale_var,
+                'seeds': seeds}
+        out_file = os.path.join(self.out_dir, out_name)
+        with open(out_file, mode='wb+') as f:
+            pkl.dump(dump, f)
+
+    def load_model(self, model_file):
+        """Load the model from the file. This involves:
+            Setting the p scale
+            Setting the fixed_weights from the seeds
+            Making the uncompressed mask 0
+
+        """
+        print('Loading model from {}'.format(model_file))
+        p_scale_var, seeds = self._get_from_file(model_file)
+
+        self.sess.run(self.load_p_scale, feed_dict={self.loaded_p_scale_var: p_scale_var})
+        for block_index, block_seed in enumerate(seeds):
+            self.sess.run([self.load_block, self.load_mask_update],
+                          feed_dict={self.loaded_block_index: block_index,
+                                     self.loaded_block_seed: block_seed})
+
+    def _get_from_file(self, model_file):
+        """Get the seeds and the pscale from file"""
+        with open(model_file, mode='rb') as f:
+            model = pkl.load(f)
+        return model['p_scale_var'], model['seeds']
