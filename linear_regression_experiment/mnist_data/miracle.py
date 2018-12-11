@@ -10,7 +10,7 @@ from utils.file_io import dump_to_file, load_from_file
 DTYPE = tf.float32
 LOG_INITIAL_SIGMA = -10.
 LOG_P_INITIAL_SIGMA = 0
-TRAIN_P_SIGMA = False
+TRAIN_P_SIGMA = True
 DIMENSION = [784, 10]  # Dimension of the linear regression matrix before any block or hashing tricks.
 NUMPY_SEED = 53  # Used for deterministic generating of permutations and of samples. Needed for loading
 
@@ -224,7 +224,7 @@ class MnistMiracle(object):
         print("Finished pretraining with:\n"
               "\t Mean KL {0} bits\n"
               "\t Prior with scale {1}\n"
-              "\t Accuracy: {2}".format(
+              "\t Accuracy: {2}\n".format(
             mean_kl / np.log(2), scale, accuracy))
 
     def _show_weights(self):
@@ -397,8 +397,8 @@ class MnistMiracle(object):
 
             print('Block {0} of {1} compressed'.format(block_index, self.num_blocks))
             print('Retraining for {} iterations'.format(retrain_iter))
-            self.train(iterations=retrain_iter, verbose=False)
-
+            self.sess.run([self.train_op_no_scales, self.kl_penalty_update])
+            print("P_scale_var: {}".format(self.sess.run(self.p_scale_var)))
             self.test(kl_loss=True)
 
         p_scale_var = self.sess.run(self.p_scale_var)
