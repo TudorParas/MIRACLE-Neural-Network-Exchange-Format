@@ -81,20 +81,21 @@ class MiracleGraph(object):
             epsilon = tf.random_normal([nr_trained_vars], name='epsilon')  # expensive
             weights = mu + epsilon * sigma
 
-            with tf.name_scope('expand_weights'):
-                expanded_weights = mgu.expand_variable(weights, shape, nr_hashed_vars, hash_group_size)
-
         with tf.name_scope('fixed_weights'):
             # Define a set of fixed weights which we'll use one we compress a variable.
             # This allows for training uncompressed blocks whilst keeping compressed blocks steady
-            fixed_weights = tf.Variable(tf.zeros_like(expanded_weights), trainable=False, name="fixed_weights")
+            fixed_weights = tf.Variable(tf.zeros_like(weights), trainable=False, name="fixed_weights")
             # Create the uncompressed mask which allows us to make the choice between the fixed and variational weights
-            layer_uncompressed_mask = tf.Variable(tf.ones_like(expanded_weights), trainable=False,
+            layer_uncompressed_mask = tf.Variable(tf.ones_like(weights), trainable=False,
                                                   name='uncompressed_mssk')
 
         with tf.name_scope("combined_weights"):
-            combined_weights = layer_uncompressed_mask * expanded_weights + (
+            combined_weights = layer_uncompressed_mask * weights + (
                         1 - layer_uncompressed_mask) * fixed_weights
+
+        with tf.name_scope('expand_weights'):
+            # Expand the hashed weights
+            expanded_weights = mgu.expand_variable(combined_weights, shape, nr_hashed_vars, hash_group_size)
 
         # Keep track of the actual weights, as they will be used to define the KL loss and during compression
         self.variables.append((mu, sigma))
@@ -104,7 +105,7 @@ class MiracleGraph(object):
         self.p_scale_vars.append(p_scale_var)
         self.shapes.append(shape)
 
-        return combined_weights
+        return expanded_weights
 
     def compress(self, loss, compressed_size_bytes=None, block_size_vars=None, bits_per_block=None, optimizer=None,
                  initial_kl_penalty=1e-08, kl_penalty_step=1.0002, pretrain_iterations=None):
@@ -114,7 +115,7 @@ class MiracleGraph(object):
         Parameters
         ---------
         loss: tf.Tensor
-            The loss defined in the graph
+            The loss defined in the graph. Must be a 0-D tensor of type float
         compressed_size_bytes: int
             Size of the compressed file in bytes.
             Mandatory if the user doesn't specify both block_size_vars and bits_per_block.
@@ -145,60 +146,25 @@ class MiracleGraph(object):
         Function in place only to give structure to the library.
         Here we define the whole graph before doing the execution in a TensorFlow session.
         """
+        self._create_graph_parameters(compressed_size_bytes, block_size_vars, bits_per_block)
+        self._create_mu_sigma()
+        self._create_p_scale()
+
         with tf.name_scope("KL_loss"):
-            logging.info("Creating KL loss for {} layers".format(len(self.variables)))
-            # Compute some parameters we'll need during creating the loss
-            self._create_loss_parameters(compressed_size_bytes, block_size_vars, bits_per_block)
-            self._create_mu_sigma()
-            self._create_p_scale()
-
-            # Define the prior distribution and the variational distribution
-            w_dist = tf.contrib.distribution.Normal(loc=self.mu, scale=self.sigma)
-            p = tf.contrib.distributions.Normal(loc=0, scale=self.p_scale)
-            # Compute the block-wise kl divergence. We use that KL divergence is additive along dimensions.
-            # Because each parameter is a new dimensions, the sum along columns gives us the block KL
-            total_kl = tf.distributions.kl_divergence(w_dist, p)
-            block_kl = tf.reduce_sum(total_kl, axis=1)
-            self.mean_kl = tf.reduce_mean(block_kl)  # used for logging purposes
-
-            # Define a variable that keeps track of which layers are compressed.
-            # This is redundant; can be inferred from layer_uncompressed_masks. Created because the code is simpler
-            self.block_uncompressed_mask = tf.Variable(tf.ones(shape=self.nr_blocks), trainable=False)
-            # Define variable that allows us to control whether we want to enable the loss or not
-            self.enable_kl_loss = tf.Variable(1., dtype=self.dtype, trainable=False)
-
-            # Define the KL penalties. What we multiply the KL loss by
-            self.kl_penalties = tf.Variable(tf.fill([self.nr_blocks], initial_kl_penalty), dtype=self.dtype)
-            # Operation to update the penalty in case the kl_loss exceeds the target kl
-            self.kl_penalty_update = self.kl_penalties.assign(
-                tf.where(
-                    condition=tf.logical_and(  # Block is uncompressed and the block's KL is greater than the target
-                        tf.cast(self.block_uncompressed_mask, tf.bool),
-                        tf.greater(block_kl, self.kl_target)),
-                    x=self.kl_penalties * kl_penalty_step,  # Increase penalty
-                    y=self.kl_penalties / kl_penalty_step),  # Decrease penalty
-                name='KL_penalty_update')
-
-            # Finally, define the KL loss
-            self.kl_loss = tf.reduce_sum(
-                block_kl * self.block_uncompressed_mask * self.kl_penalties) * self.enable_kl_loss
+            self._initialize_kl_loss(initial_kl_penalty, kl_penalty_step)
 
         with tf.name_scope("Training"):
-            self.total_loss = loss + self.kl_loss
+            self._initialize_training_graph(loss, optimizer)
 
-            if optimizer is None:
-                # Use the Adam Optimizer with default parameters:
-                optimizer = tf.train.AdamOptimizer()
+        with tf.name_scope('P_Sample'):
+            self._generate_p_sample()
+        with tf.name_scope('Compression'):
+            self._initialize_compressor()
+        with tf.name_scope('Loader'):
+            self._initialize_loader()
 
-            self.train_op = optimizer.minimize(self.total_loss)
-
-            # Define train operation that does not train the layer p scales.
-            # This is used after during retraining after beginning compression.
-            no_scales_list = [v for v in tf.trainable_variables() if v not in self.p_scale_vars]
-            self.train_op_no_scales = optimizer.minimize(self.total_loss, var_list=no_scales_list)
-
-    def _create_loss_parameters(self, compressed_size_bytes, block_size_vars, bits_per_block):
-        """Create variables that will help in creating the KL loss"""
+    def _create_graph_parameters(self, compressed_size_bytes, block_size_vars, bits_per_block):
+        """Create variables that will help in defining the graph"""
         self.nr_layers = len(self.shapes)
         self.layer_sizes = [np.prod(shape) for shape in self.shapes]
         self.nr_actual_vars = sum(self.layer_sizes)
@@ -262,3 +228,72 @@ class MiracleGraph(object):
         permuted_p_scale = tf.gather(p_scale, p_scale_permutation)
         # Reshape to accb shape
         self.p_scale = tf.reshape(permuted_p_scale, self.accb_shape)
+
+    def _initialize_kl_loss(self, initial_kl_penalty, kl_penalty_step):
+        logging.info("Creating KL loss for {} layers".format(len(self.variables)))
+        # Compute some parameters we'll need during creating the loss
+
+        # Define the prior distribution and the variational distribution
+        w_dist = tf.contrib.distribution.Normal(loc=self.mu, scale=self.sigma)
+        p = tf.contrib.distributions.Normal(loc=0, scale=self.p_scale)
+        # Compute the block-wise kl divergence. We use that KL divergence is additive along dimensions.
+        # Because each parameter is a new dimensions, the sum along columns gives us the block KL
+        total_kl = tf.distributions.kl_divergence(w_dist, p)
+        block_kl = tf.reduce_sum(total_kl, axis=1)
+        self.mean_kl = tf.reduce_mean(block_kl)  # used for logging purposes
+
+        # Define a variable that keeps track of which layers are compressed.
+        # This is redundant; can be inferred from layer_uncompressed_masks. Created because the code is simpler
+        self.block_uncompressed_mask = tf.Variable(tf.ones(shape=self.nr_blocks), trainable=False)
+        # Define variable that allows us to control whether we want to enable the loss or not
+        self.enable_kl_loss = tf.Variable(1., dtype=self.dtype, trainable=False)
+
+        # Define the KL penalties. What we multiply the KL loss by
+        self.kl_penalties = tf.Variable(tf.fill([self.nr_blocks], initial_kl_penalty), dtype=self.dtype)
+        # Operation to update the penalty in case the kl_loss exceeds the target kl
+        self.kl_penalty_update = self.kl_penalties.assign(
+            tf.where(
+                condition=tf.logical_and(  # Block is uncompressed and the block's KL is greater than the target
+                    tf.cast(self.block_uncompressed_mask, tf.bool),
+                    tf.greater(block_kl, self.kl_target)),
+                x=self.kl_penalties * kl_penalty_step,  # Increase penalty
+                y=self.kl_penalties / kl_penalty_step),  # Decrease penalty
+            name='KL_penalty_update')
+
+        # Finally, define the KL loss
+        self.kl_loss = tf.reduce_sum(
+            block_kl * self.block_uncompressed_mask * self.kl_penalties) * self.enable_kl_loss
+
+    def _initialize_training_graph(self, loss, optimizer):
+        loss = tf.cast(loss, dtype=self.dtype)
+        self.total_loss = loss + self.kl_loss
+
+        if optimizer is None:
+            # Use the Adam Optimizer with default parameters:
+            optimizer = tf.train.AdamOptimizer()
+
+        self.train_op = optimizer.minimize(self.total_loss)
+
+        # Define train operation that does not train the layer p scales.
+        # This is used after during retraining after beginning compression.
+        no_scales_list = [v for v in tf.trainable_variables() if v not in self.p_scale_vars]
+        self.train_op_no_scales = optimizer.minimize(self.total_loss, var_list=no_scales_list)
+
+    def _generate_p_sample(self):
+        """Generate the block sample from p that we'll use for all the compression"""
+        sample_block = self._get_normal_sample_block()  # use this block to sample
+        self.sample_block = tf.constant(sample_block, dtype=self.dtype)
+        # Sample p using the sample vector. This means just multiplying it by p-s stf
+        self.p_sample = sample_block * self.p_scale
+
+    def _get_normal_sample_block(self):
+        samples = np.power(2, self.bits_per_block)  # total nr of samples we consider
+        sample_block = np.random.normal(size=[samples, self.block_size_vars])
+
+        return sample_block
+
+    def _initialize_compressor(self):
+        pass
+
+    def _initialize_loader(self):
+        pass
