@@ -1,4 +1,4 @@
-from linear_regression_experiment.toy_data.basic_miracle import BasicMiracle
+from examples.linear_regression_experiment.toy_data.basic_miracle import BasicMiracle
 
 NO_KL_ITERATIONS = 1000
 KL_ITERATIONS = 8000

@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow as tf
 
-from linear_regression_experiment.toy_data.toy_data import ToyData
+from examples.linear_regression_experiment.toy_data.toy_data import ToyData
 
 # Data parameters
 SAMPLES = 10000

@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-from linear_regression_experiment.toy_data.toy_data import ToyData
+from examples.linear_regression_experiment.toy_data.toy_data import ToyData
 
 SAMPLES = 10000
 SLOPE = 53

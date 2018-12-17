@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-from linear_regression_experiment.mnist_data.mnist_data import MnistData, IMAGE_SIZE, LABEL_SIZE
+from examples.linear_regression_experiment.mnist_data.mnist_data import MnistData, IMAGE_SIZE, LABEL_SIZE
 
 BATCH_SIZE = 128
 LEARNING_RATE = 1e-3

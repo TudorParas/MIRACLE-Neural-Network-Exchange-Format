@@ -3,7 +3,7 @@ import os
 import numpy as np
 import tensorflow as tf
 
-from linear_regression_experiment.mnist_data.mnist_data import MnistData
+from examples.linear_regression_experiment.mnist_data.mnist_data import MnistData
 from utils.file_io import dump_to_file, load_from_file
 
 # Parameters for defining the graph
