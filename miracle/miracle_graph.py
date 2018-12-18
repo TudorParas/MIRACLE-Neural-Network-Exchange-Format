@@ -94,7 +94,7 @@ class MiracleGraph(object):
                         1 - layer_uncompressed_mask) * fixed_weights
 
         with tf.name_scope('expand_weights'):
-            # Expand the hashed weights
+            # Expand the hashed weights and put them in the corresponding shape
             expanded_weights = mgu.expand_variable(combined_weights, shape, nr_hashed_vars, hash_group_size)
 
         # Keep track of the actual weights, as they will be used to define the KL loss and during compression
