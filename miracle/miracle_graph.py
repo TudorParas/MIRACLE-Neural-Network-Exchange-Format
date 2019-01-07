@@ -33,12 +33,13 @@ class MiracleGraph(object):
         self.dtype = dtype
         # Define a lsit used to accumulate all the parameters so that we can block them when doing the KL loss
         self.variables = list()
-        # Accumulate the uncompressed masks as we'll need to update them during compression
-        self.layer_uncompressed_masks = list()
+        # Accumulate the fixed weights and the uncompressed masks for each layer.
+        # Each entry has the format (new_fixed_weight, new_mask)
+        self.layers_fw_um = list()
         # Define a list that accumulates the p_scale for each layer
         self.p_scale_vars = list()
-        # Define list that accumulates shapes of each layer
-        self.shapes = list()
+        # Define list that accumulates the number of actual standing vars in each layer after hashing
+        self.hashed_layer_sizes = list()
 
     def create_variable(self, shape, hash_group_size=1, scale=None):
         """
@@ -58,11 +59,13 @@ class MiracleGraph(object):
 
         """
         if scale is None:
+            # The bigger the layer, the smaller the standard deviation.
             scale = np.sqrt(1 / np.prod(shape[:-1]))
 
         nr_hashed_vars = np.prod(shape) // hash_group_size  # this * hash_group_size = nr of vars hashed
         nr_leftover_vars = np.prod(shape) % hash_group_size  # leftover bc it doesn't divide perfectly
         nr_trained_vars = nr_hashed_vars + nr_leftover_vars
+        logging.info("Creating variable of shape {} with hash size {}".format(shape, hash_group_size))
         with tf.name_scope('mu'):
             # Create the mean for each var in the layer. The sampling stdev is scaled by first dim so that
             # Bigger layers are initialized closer to 0.
@@ -91,7 +94,7 @@ class MiracleGraph(object):
 
         with tf.name_scope("combined_weights"):
             combined_weights = layer_uncompressed_mask * weights + (
-                        1 - layer_uncompressed_mask) * fixed_weights
+                    1 - layer_uncompressed_mask) * fixed_weights
 
         with tf.name_scope('expand_weights'):
             # Expand the hashed weights and put them in the corresponding shape
@@ -99,11 +102,11 @@ class MiracleGraph(object):
 
         # Keep track of the actual weights, as they will be used to define the KL loss and during compression
         self.variables.append((mu, sigma))
-        self.layer_uncompressed_masks.append(layer_uncompressed_mask)
+        self.layers_fw_um.append((fixed_weights, layer_uncompressed_mask))
         # Create the prior scale for this layer
         p_scale_var = tf.Variable(self.log_p_initial_sigma, dtype=self.dtype, trainable=self.train_p_scale)
         self.p_scale_vars.append(p_scale_var)
-        self.shapes.append(shape)
+        self.hashed_layer_sizes.append(nr_trained_vars)
 
         return expanded_weights
 
@@ -135,10 +138,13 @@ class MiracleGraph(object):
         pretrain_iterations: int
             Maximum number of iterations we would like to pretrain for.
         """
+        # Create the graph
+        with tf.name_scope('train_compression'):
+            self._initialize_train_compression_graph(loss, compressed_size_bytes, block_size_vars, bits_per_block,
+                                                     optimizer, initial_kl_penalty, kl_penalty_step)
 
-        self._initialize_train_compression_graph(loss, compressed_size_bytes, block_size_vars, bits_per_block,
-                                                 optimizer,
-                                                 initial_kl_penalty, kl_penalty_step)
+        # Execute the graph
+        self._pretrain(pretrain_iterations)
 
     def _initialize_train_compression_graph(self, loss, compressed_size_bytes, block_size_vars,
                                             bits_per_block, optimizer, initial_kl_penalty, kl_penalty_step):
@@ -146,9 +152,13 @@ class MiracleGraph(object):
         Function in place only to give structure to the library.
         Here we define the whole graph before doing the execution in a TensorFlow session.
         """
+        logging.info("Initializing compression graph")
         self._create_graph_parameters(compressed_size_bytes, block_size_vars, bits_per_block)
-        self._create_mu_sigma()
-        self._create_p_scale()
+
+        with tf.name_scope('mu_sigma'):
+            self._create_mu_sigma()
+        with tf.name_scope('p_scale'):
+            self._create_p_scale()
 
         with tf.name_scope("KL_loss"):
             self._initialize_kl_loss(initial_kl_penalty, kl_penalty_step)
@@ -156,31 +166,37 @@ class MiracleGraph(object):
         with tf.name_scope("Training"):
             self._initialize_training_graph(loss, optimizer)
 
-        with tf.name_scope('P_Sample'):
-            self._generate_p_sample()
         with tf.name_scope('Compression'):
             self._initialize_compressor()
-        with tf.name_scope('Loader'):
-            self._initialize_loader()
 
     def _create_graph_parameters(self, compressed_size_bytes, block_size_vars, bits_per_block):
         """Create variables that will help in defining the graph"""
-        self.nr_layers = len(self.shapes)
-        self.layer_sizes = [np.prod(shape) for shape in self.shapes]
-        self.nr_actual_vars = sum(self.layer_sizes)
+        self.nr_layers = len(self.hashed_layer_sizes)
+        self.nr_actual_vars = sum(self.hashed_layer_sizes)
         self.block_size_vars, self.bits_per_block = mgu.parse_compressed_size(compressed_size_bytes,
                                                                               self.nr_actual_vars,
                                                                               block_size_vars,
                                                                               bits_per_block)
         self.kl_target = tf.constant(self.bits_per_block * np.log(2), dtype=self.dtype)
         self.nr_blocks = int(np.ceil(self.nr_actual_vars / self.block_size_vars))
-        self.accb_shape = [self.nr_blocks, self.block_size_vars]  # Shape of the accumulated blocks. One block per row
+        # Shape of the accumulated blocks. One block per row. We use this because it makes it easier for us to access
+        # variables in the same block
+        self.accb_shape = [self.nr_blocks, self.block_size_vars]
         # The last block can be not fully filled, so we'll have variables not used in inference, but used for kl loss.
-        self.nr_train_vars = np.prod(self.accb_shape)
+        self.nr_train_vars = int(np.prod(self.accb_shape))
         # Define the permutations used to put variables into blocks
         self.permutation = np.random.permutation(self.nr_train_vars)
         # Get the inverse of the permutation. Used to rearrange the created variables into the desired shape.
         self.permutation_inv = np.argsort(self.permutation)
+        logging.info("\n\tUsing {nr_layers} layers\n"
+                     "\tNumber of actual variables {nr_actual_vars}\n"
+                     "\tNumber of trained variables {nr_trained_vars}\n"
+                     "\tBlock size {block_size_vars}, Bits per block {bits_per_block}\n"
+                     "\tKL target {kl_target}\n"
+                     "\tAccumulated Blocks Shape {accb_shape}".format(
+            nr_layers=self.nr_layers, nr_actual_vars=self.nr_actual_vars, nr_trained_vars=self.nr_train_vars,
+            block_size_vars=self.block_size_vars, bits_per_block=self.bits_per_block, kl_target=self.kl_target,
+            accb_shape=self.accb_shape))
 
     def _create_mu_sigma(self):
         """
@@ -192,22 +208,27 @@ class MiracleGraph(object):
         """
         # Get the mu's and sigmas and concat them
         mu, sigma = list(zip(*self.variables))
-        mu = tf.concat(mu, axis=0, name='mu')
-        sigma = tf.concat(sigma, axis=0, name='sigma')
+        with tf.name_scope('mu'):
+            mu = tf.concat(mu, axis=0, name='mu')
+            # Pad mu so that we have variables for each block
+            mu_padding = tf.Variable(tf.zeros(self.nr_train_vars - self.nr_actual_vars), dtype=self.dtype,
+                                     name='mu_padding')
+            padded_mu = tf.concat((mu, mu_padding), axis=0, name='padded_mu')
+            # Apply the permutation
+            permuted_mu = tf.gather(padded_mu, self.permutation, name='permuted_mu')
+            # Reshape mu to accb shape
+            self.mu = tf.reshape(permuted_mu, self.accb_shape)
 
-        # Pad mu and sigma so that we have variables for each block
-        mu_padding = tf.Variable(tf.zeros(self.nr_train_vars - self.nr_actual_vars), dtype=self.dtype)
-        sigma_padding = tf.Variable(tf.zeros(self.nr_train_vars - self.nr_actual_vars), dtype=self.dtype)
-        padded_mu = tf.concat((mu, mu_padding), axis=0, name='padded_mu')
-        padded_sigma = tf.concat((sigma, sigma_padding), axis=0, name='padded_sigma')
-
-        # Apply the permutation
-        permuted_mu = tf.gather(padded_mu, self.permutation)
-        permuted_sigma = tf.gather(padded_sigma, self.permutation)
-
-        # Reshape mu, sigma and p so that it has the accb shape
-        self.mu = tf.reshape(permuted_mu, self.accb_shape)
-        self.sigma = tf.reshape(permuted_sigma, self.accb_shape)
+        with tf.name_scope('sigma'):
+            sigma = tf.concat(sigma, axis=0, name='sigma')
+            # Pad sigma so that we have variables for each block
+            sigma_padding = tf.Variable(tf.zeros(self.nr_train_vars - self.nr_actual_vars), dtype=self.dtype,
+                                        name='sigma_padding')
+            padded_sigma = tf.concat((sigma, sigma_padding), axis=0, name='padded_sigma')
+            # Apply the permutation
+            permuted_sigma = tf.gather(padded_sigma, self.permutation, name='permuted_sigma')
+            # Reshape sigma to accb shape
+            self.sigma = tf.reshape(permuted_sigma, self.accb_shape)
 
     def _create_p_scale(self):
         """
@@ -218,24 +239,22 @@ class MiracleGraph(object):
         """
         # Create and extra layer which would contain the variables created for padding
         extra_layer = tf.Variable(self.log_p_initial_sigma, dtype=self.dtype, trainable=self.train_p_scale)
-        p_scale_vars = tf.concat(self.p_scale_vars + [extra_layer], axis=0)
+        p_scale_vars = tf.stack(self.p_scale_vars + [extra_layer], axis=0)
         p_scale = tf.exp(p_scale_vars)  # apply the exponent so that we get the actual scale
         # Define the mapping from variables to which layer they are
         # This function outputs 000111122 if 1st layer has 3 variables, second layer has 4, and out padding size is 2
         p_scale_permutation = np.repeat(range(self.nr_layers + 1),
-                                        self.layer_sizes + [self.nr_train_vars - self.nr_actual_vars])
+                                        self.hashed_layer_sizes + [self.nr_train_vars - self.nr_actual_vars])
         p_scale_permutation = p_scale_permutation[self.permutation]  # apply the actual permutation to get the mapping
-        permuted_p_scale = tf.gather(p_scale, p_scale_permutation)
+        permuted_p_scale = tf.gather(p_scale, p_scale_permutation)  # Apply the mapping to our p_scale
         # Reshape to accb shape
         self.p_scale = tf.reshape(permuted_p_scale, self.accb_shape)
 
     def _initialize_kl_loss(self, initial_kl_penalty, kl_penalty_step):
         logging.info("Creating KL loss for {} layers".format(len(self.variables)))
-        # Compute some parameters we'll need during creating the loss
-
         # Define the prior distribution and the variational distribution
-        w_dist = tf.contrib.distribution.Normal(loc=self.mu, scale=self.sigma)
-        p = tf.contrib.distributions.Normal(loc=0, scale=self.p_scale)
+        w_dist = tf.contrib.distributions.Normal(loc=self.mu, scale=self.sigma)
+        p = tf.contrib.distributions.Normal(loc=0., scale=self.p_scale)
         # Compute the block-wise kl divergence. We use that KL divergence is additive along dimensions.
         # Because each parameter is a new dimensions, the sum along columns gives us the block KL
         total_kl = tf.distributions.kl_divergence(w_dist, p)
@@ -248,7 +267,7 @@ class MiracleGraph(object):
         # Define variable that allows us to control whether we want to enable the loss or not
         self.enable_kl_loss = tf.Variable(1., dtype=self.dtype, trainable=False)
 
-        # Define the KL penalties. What we multiply the KL loss by
+        # Define the KL penalties. We use this to increase or decrease the KL loss.
         self.kl_penalties = tf.Variable(tf.fill([self.nr_blocks], initial_kl_penalty), dtype=self.dtype)
         # Operation to update the penalty in case the kl_loss exceeds the target kl
         self.kl_penalty_update = self.kl_penalties.assign(
@@ -276,24 +295,113 @@ class MiracleGraph(object):
 
         # Define train operation that does not train the layer p scales.
         # This is used after during retraining after beginning compression.
-        no_scales_list = [v for v in tf.trainable_variables() if v not in self.p_scale_vars]
-        self.train_op_no_scales = optimizer.minimize(self.total_loss, var_list=no_scales_list)
+        no_pscales_list = [v for v in tf.trainable_variables() if v not in self.p_scale_vars]
+        self.train_op_no_pscales = optimizer.minimize(self.total_loss, var_list=no_pscales_list)
 
-    def _generate_p_sample(self):
-        """Generate the block sample from p that we'll use for all the compression"""
-        sample_block = self._get_normal_sample_block()  # use this block to sample
-        self.sample_block = tf.constant(sample_block, dtype=self.dtype)
-        # Sample p using the sample vector. This means just multiplying it by p-s stf
-        self.p_sample = sample_block * self.p_scale
+    def _initialize_compressor(self):
+        """Create the graph for the compression operations"""
+        self.block_to_compress_index = tf.placeholder(tf.int32)
+        sample_block = self._get_normal_sample_block()
+        with tf.name_scope('block_info'):
+            # Get the mu and sigma for this block
+            block_mu = self.mu[self.block_to_compress_index, :]
+            block_sigma = self.sigma[self.block_to_compress_index, :]
+            block_p = self.p_scale[self.block_to_compress_index, :]
+
+        with tf.name_scope('p_sample'):
+            """Generate the samples for this prior distribution"""
+            p_sample = sample_block * block_p
+
+        with tf.name_scope('probabilities'):
+            # Compute the negative probabilities of the sample for the p and q distributions.
+            self.log_q_probs = tf.reduce_sum(
+                tf.log(1 / tf.sqrt(2 * np.pi * tf.pow(block_sigma, 2))) - (
+                        tf.square(p_sample - block_mu) / (2 * tf.square(block_sigma))
+                ),
+                axis=1)
+            self.log_p_probs = tf.reduce_sum(tf.log(1 / tf.sqrt(2 * np.pi * tf.square(block_p))) - (
+                    tf.square(sample_block) / 2), axis=1)
+
+        with tf.name_scope('sampling'):
+            # Create a Categorical distribution which we'll use for sampling.
+            # By using softmax we turn the log probabilities into actual probabilities
+            alphas = tf.nn.softmax(self.log_q_probs - self.log_p_probs)
+            cat_distr = tf.distributions.Categorical(probs=alphas)
+
+            self.chosen_seed = cat_distr.sample()
+            # self.chosen_seed = tf.argmax(self.log_q_probs)  # Choose the value most like to have come from q
+            self.chosen_sample = p_sample[self.chosen_seed, :]
+
+        self._create_intermediate_fw_um()
+
+        with tf.name_scope('compression_operations'):
+            self.fixed_weights_update = tf.scatter_update(ref=self.intermediate_concat_fixed_weights,
+                                                          indices=self.block_to_compress_index,
+                                                          updates=self.chosen_sample,
+                                                          name='fixed_weights_update')
+            # ToDo remove this once concat_uncompressed_mask is changed
+            self.mask_update = tf.scatter_update(ref=self.intermediate_concat_uncompressed_mask,
+                                                 indices=self.block_to_compress_index,
+                                                 updates=tf.fill([self.accb_shape[1]], 1.),
+                                                 name='mask_update')
+            self.block_mask_update = tf.scatter_update(self.block_uncompressed_mask,
+                                                       indices=self.block_to_compress_index,
+                                                       updates=1.,
+                                                       name='block_mask_update')
 
     def _get_normal_sample_block(self):
+        """Generate the block that we will use to sample. Generating it now for all functions saves time"""
         samples = np.power(2, self.bits_per_block)  # total nr of samples we consider
         sample_block = np.random.normal(size=[samples, self.block_size_vars])
+        sample_block = tf.constant(sample_block, dtype=self.dtype)
 
         return sample_block
 
-    def _initialize_compressor(self):
+    def _create_intermediate_fw_um(self):
+        logging.info("Creating intermediate fixed weights and uncompressed mask")
+        # Update the fixed weights and the layer masks. We will use an intermediate variable which we'll update,
+        # and then we update the original (given to the user) fixed weights and uncompressed masks.
+
+        # Create a fixed weight variable that will replesent all the fixed weights concatenated.
+        # These will be as if the permutation has already been done because it leads to easier updating.
+        self.intermediate_concat_fixed_weights = tf.Variable(tf.fill(self.accb_shape, 0.), dtype=self.dtype,
+                                                             name='concatenated_fixed_weights')
+        # ToDo create this from block_uncompressed_mask
+        self.intermediate_concat_uncompressed_mask = tf.Variable(tf.fill(self.accb_shape, 0.), dtype=self.dtype,
+                                                                 name='concatenated_uncompressed_wasks')
+
+        with tf.name_scope('FW_UM_copying'):
+            logging.info("Restoring the intermediate weights to fit the shape of the original ones")
+            # Flatten and apply the inverse permutation to the weights and the masks. This is to allow us to map the
+            # values of these concatenated FW and UM back to the original ones
+            restored_concat_fixed_weights = tf.gather(tf.reshape(self.intermediate_concat_fixed_weights, [-1]),
+                                                      self.permutation_inv)
+            restored_concat_uncompressed_masks = tf.gather(tf.reshape(self.intermediate_concat_uncompressed_mask, [-1]),
+                                                           self.permutation_inv)
+
+            # Create the graph that maps these variables back the the original ones. This is done by splitting them
+            # And then using the assign operations given by the original ones.
+            split_fw = tf.split(restored_concat_fixed_weights,
+                                self.hashed_layer_sizes + [
+                                    self.nr_train_vars - self.nr_actual_vars])  # all layers + the padded layer
+            split_um = tf.split(restored_concat_uncompressed_masks,
+                                self.hashed_layer_sizes + [
+                                    self.nr_train_vars - self.nr_actual_vars])  # all layers + the padded layer
+            logging.info("Create copying graph to copy intermediate weights into the original ones")
+            self.copy_ops = list()
+            for layer_index in range(self.nr_layers):
+                original_fixed_weights, original_uncompressed_mask = self.layers_fw_um[layer_index]
+                copied_fw = split_fw[layer_index]
+                copied_um = split_um[layer_index]
+
+                fw_copy_op = original_fixed_weights.assign(copied_fw)
+                um_copy_op = original_uncompressed_mask.assign(copied_um)
+                copy_op = tf.group(fw_copy_op, um_copy_op)
+
+                self.copy_ops.append(copy_op)
+
+    def _pretrain(self, pretrain_iterations):
         pass
 
-    def _initialize_loader(self):
+    def load(self, file_path):
         pass

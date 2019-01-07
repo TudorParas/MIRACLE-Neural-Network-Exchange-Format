@@ -36,7 +36,7 @@ def parse_compressed_size(compressed_size_bytes, nr_actual_vars, block_size_vars
         block_size_vars = np.ceil(nr_actual_vars / nr_total_blocks)
 
     logging.info("Using block_size_vars {}, bits_per_block {}".format(block_size_vars, bits_per_block))
-    return block_size_vars, bits_per_block
+    return int(block_size_vars), int(bits_per_block)
 
 
 def expand_variable(var, shape, nr_hashed_vars, hash_group_size):
