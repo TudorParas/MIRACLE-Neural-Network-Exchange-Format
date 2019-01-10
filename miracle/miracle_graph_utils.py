@@ -3,6 +3,8 @@ import numpy as np
 import tensorflow as tf
 import logging
 
+from sobol_seq import i4_sobol_generate
+from scipy.stats import norm
 
 def parse_compressed_size(compressed_size_bytes, nr_actual_vars, block_size_vars, bits_per_block):
     """
@@ -54,3 +56,20 @@ def expand_variable(var, shape, nr_hashed_vars, hash_group_size):
     expanded_vars = tf.concat([expanded_hashed, var[nr_hashed_vars:]], axis=0, name='expanded_vars')
 
     return tf.reshape(expanded_vars, shape=shape)
+
+
+def generate_quasi_sample(block_size_vars, bits_per_block):
+    """Generate a quasi sample that is more evently distributed that if we were to use randomness"""
+    samples = np.power(2, bits_per_block)
+    uni_quasi = np.array(i4_sobol_generate(block_size_vars, samples, skip=1))  # generate samples that are evenly spaces. sobol_generate(block_size, 2**bits_per_block)
+    normal_quasi = norm.ppf(uni_quasi)
+
+    return normal_quasi
+
+
+def generate_normal_sample(block_size_vars, bits_per_block):
+    """Generate the block that we will use to sample. Generating it now for all functions saves time"""
+    samples = np.power(2, bits_per_block)  # total nr of samples we consider
+    sample_block = np.random.normal(size=[samples, block_size_vars])
+
+    return sample_block

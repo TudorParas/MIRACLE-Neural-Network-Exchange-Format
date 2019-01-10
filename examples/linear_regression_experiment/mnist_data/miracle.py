@@ -397,9 +397,9 @@ class MnistMiracle(object):
 
             print('Block {0} of {1} compressed'.format(block_index, self.num_blocks))
             print('Retraining for {} iterations'.format(retrain_iter))
-            self.sess.run([self.train_op_no_scales, self.kl_penalty_update])
+            for _ in range(retrain_iter):
+                self.sess.run([self.train_op_no_scales, self.kl_penalty_update])
             print("P_scale_var: {}".format(self.sess.run(self.p_scale_var)))
-            self.test(kl_loss=True)
 
         p_scale_var = self.sess.run(self.p_scale_var)
         out_file = os.path.join(self.out_dir, out_name)
