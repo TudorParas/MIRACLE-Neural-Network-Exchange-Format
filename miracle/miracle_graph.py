@@ -164,39 +164,6 @@ class MiracleGraph(object):
             with tf.name_scope("Loader"):
                 self._create_loader_graph()
 
-    def assign_session(self, tensorflow_session):
-        """
-        Assign the tensorflow session to the graph
-
-        Parameters
-        ---------
-        tensorflow_session: tf.Session
-            TensorFlow session used to execute the graph
-        """
-        self.sess = tensorflow_session
-
-
-    def compress(self, pretrain_iterations, train_iterations, retrain_iterations, out_file, session):
-        """
-        Execute the pretraining, training and the compression
-
-        Parameters
-        ---------
-        pretrain_iterations: int
-            Maximum number of iterations we would like to pretrain for.
-        train_iterations: int
-            For how many iterations we train.
-        retrain_iterations: int
-            For how many iterations we retrain after compressing a block
-        out_file: str
-            Where to output the compressed model
-        """
-        self._pretrain(pretrain_iterations)
-        self._train(train_iterations)
-        self._execute_compression(retrain_iter=retrain_iterations, out_file=out_file)
-
-
-
     def _create_graph_parameters(self, compressed_size_bytes, block_size_vars, bits_per_block):
         """Create variables that will help in defining the graph"""
         self.nr_layers = len(self.hashed_layer_sizes)
@@ -334,7 +301,8 @@ class MiracleGraph(object):
     def _initialize_compressor(self):
         """Create the graph for the compression operations"""
         self.block_to_compress_index = tf.placeholder(tf.int32)
-        sample_block = tf.constant(mgu.generate_quasi_sample(self.block_size_vars, self.bits_per_block), dtype=self.dtype)
+        sample_block = tf.constant(mgu.generate_quasi_sample(self.block_size_vars, self.bits_per_block),
+                                   dtype=self.dtype)
 
         with tf.name_scope('block_info'):
             # Get the mu and sigma for this block
@@ -391,7 +359,6 @@ class MiracleGraph(object):
         # We create this from block uncompressed mask by repeating the nr of variables in a block along the columns
         self.intermediate_concat_uncompressed_mask = tf.multiply(tf.expand_dims(self.block_uncompressed_mask, axis=1),
                                                                  tf.ones(self.block_size_vars))
-        print("Shape uncompressed mask: {}".format(self.intermediate_concat_uncompressed_mask.shape))
 
         with tf.name_scope('FW_UM_copying'):
             logging.info("Restoring the intermediate weights to fit the shape of the original ones")
@@ -423,27 +390,56 @@ class MiracleGraph(object):
 
                 self.copy_ops.append(copy_op)
 
-    def _pretrain(self, pretrain_iterations):
-        """Pretrain the graph without enforcing kl loss"""
-        """Pretrain, without enforcing kl loss"""
-        logging.info("Strating pretraining for {0} iterations".format(pretrain_iterations))
+    def assign_session(self, tensorflow_session):
+        """
+        Assign the tensorflow session to the graph
+
+        Parameters
+        ---------
+        tensorflow_session: tf.Session
+            TensorFlow session used to execute the graph
+        """
+        self.sess = tensorflow_session
+
+    def pretrain(self, iterations, f=None):
+        """Pretrain, without enforcing kl loss
+
+        Parameters
+        ---------
+        iterations: int
+            Number of iterations we pretrain for
+        f: int -> unit
+            function defined by user that takes as arg the current iteration number. This is in order to allow the
+            user to make print statements during execution
+
+        """
+        logging.info("Strating pretraining for {0} iterations".format(iterations))
+
+        if f is None:
+            f = self._default_print
 
         self.sess.run(self.enable_kl_loss.assign(0.))
-        # print(self.sess.run([self.block_kl])[0])
-        # assert False
-        for iteration in range(pretrain_iterations):
+        for iteration in range(iterations):
             self.sess.run(self.train_op)
-            if iteration % MESSAGE_FREQUENCY == 0:
-                print("Iteration {0} ".format(iteration), end='\n\n')
+            f(iteration)
 
-                total_loss, mean_kl = self.sess.run([self.total_loss, self.mean_kl])
-                print("Total Loss--{0}, Mean KL--{1}".format(total_loss, mean_kl),
-                      end='\n\n')
+        print("Finished pretraining with: Loss {0}".format(self.sess.run(self.total_loss)))
 
-        print("Finished pretraining with: Loss {0} bits".format(self.sess.run(self.total_loss)))
+    def train(self, iterations, f=None):
+        """Train until the kl converges at a value smaller than the target kl
 
-    def _train(self, iterations):
-        """Train until the kl converges at a value smaller than the target kl"""
+        Parameters
+        ---------
+        iterations: int
+            Number of iterations we train for
+        f: int -> unit
+            function defined by user that takes as arg the current iteration number. This is in order to allow the
+            user to make print statements during execution
+        """
+        # ToDo train until mean kl and accuracy convergence.
+        if f is None:
+            f = self._default_print
+
         self.sess.run(self.enable_kl_loss.assign(1.))
         # with tf.control_dependencies([self.train_op]):
         #     kl_penalty_update = tf.identity(self.kl_penalty_update)
@@ -452,25 +448,22 @@ class MiracleGraph(object):
         for iteration in range(iterations):
             # Train until convergence of mean KL
             self.sess.run([self.train_op, self.kl_penalty_update])
+            f(iteration)
 
-            if iteration % MESSAGE_FREQUENCY == 0:
-                # ToDo do the convergence check somewhere else
-                print("Iteration {0} ".format(iteration), end='\n\n')
+    def compress(self, retrain_iterations, out_file, f=None):
+        """
+        Compress the linear regression matrix and store it in out_file
 
-                total_loss, mean_kl = self.sess.run([self.total_loss, self.mean_kl])
-                print("Total Loss--{0}, Mean KL--{1}".format(total_loss, mean_kl), end='\n\n')
-
-    def _execute_compression(self, retrain_iter, out_file):
-        """Execute the compression graph"""
-        """Compress the linear regression matrix and store it in out_file
-
-            Parameters
-            ----------
-            retrain_iter: int
-                For how many iterations we retrain after each block is compressed
-            out_file: str
-                Where to write the file
-            """
+        Parameters
+        ----------
+        retrain_iterations: int
+            For how many iterations we retrain after each block is compressed
+        out_file: str
+            Where to write the file
+        f: unit -> unit
+            function defined by user.
+            This is in order to allow the user to make print statements during execution
+        """
         mean_kl = self.sess.run(self.mean_kl)
         logging.info("Starting compression with: Mean KL {0} bits\n".format(mean_kl / np.log(2)))
 
@@ -485,14 +478,23 @@ class MiracleGraph(object):
             # Copy the intermediate fixed weights into the original ones
             self.sess.run(self.copy_ops)
             print('Block {0} of {1} compressed'.format(block_index, self.nr_blocks))
-            print('Retraining for {} iterations'.format(retrain_iter))
-            for _ in range(retrain_iter):
+            print('Retraining for {} iterations'.format(retrain_iterations))
+            for _ in range(retrain_iterations):
                 self.sess.run([self.train_op_no_pscales, self.kl_penalty_update])
-            logging.info("Total loss--{}".format(self.sess.run(self.total_loss)))
+            # Print what the user defined
+            f()
 
         p_scale_vars = self.sess.run(self.p_scale_vars)
         dump_to_file(p_scale_vars=p_scale_vars, seeds=chosen_seeds, bits_per_block=self.bits_per_block,
                      out_file=out_file)
+
+    def _default_print(self, iteration):
+        """The default print in case the user does not specify a printing instruction"""
+        if iteration % MESSAGE_FREQUENCY == 0:
+            print("Iteration {0} ".format(iteration), end='\n\n')
+
+            total_loss, mean_kl = self.sess.run([self.total_loss, self.mean_kl])
+            print("Total Loss--{0}, Mean KL--{1}".format(total_loss, mean_kl), end='\n\n')
 
     def _create_loader_graph(self):
         """Create the graph for loading the compressed model"""
@@ -507,7 +509,8 @@ class MiracleGraph(object):
         self.loaded_block_seed = tf.placeholder(tf.int32)
 
         # Recreate the block
-        sample_block = tf.constant(mgu.generate_quasi_sample(self.block_size_vars, self.bits_per_block), dtype=self.dtype)
+        sample_block = tf.constant(mgu.generate_quasi_sample(self.block_size_vars, self.bits_per_block),
+                                   dtype=self.dtype)
         block_p = self.p_scale[self.loaded_block_index, :]
         with tf.name_scope('p_sample'):
             """Generate the samples for this prior distribution"""

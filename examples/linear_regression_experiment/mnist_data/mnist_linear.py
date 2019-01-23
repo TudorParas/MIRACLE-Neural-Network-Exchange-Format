@@ -4,7 +4,7 @@ from examples.linear_regression_experiment.mnist_data.mnist_data import MnistDat
 
 BATCH_SIZE = 128
 LEARNING_RATE = 1e-3
-ITERATIONS = 4000
+ITERATIONS = 10000
 
 SUMMARIES_DIR = 'out/mnist_linear'
 

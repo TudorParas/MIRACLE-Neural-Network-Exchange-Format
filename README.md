@@ -6,13 +6,20 @@ A full description can be found in my project proposal hosted here:
 <a href="https://github.com/TudorParas/TudorParas.github.io/blob/master/pdfs/MIRACLE%20Neural%20Network%20Exchange%20Format%20-%20Final.pdf" rel="Project Proposal"><img src="https://github.com/TudorParas/TudorParas.github.io/blob/master/images/MIRACLE%20thumbnail.png?raw=true"  width="600"></a>
 
 
-### Progress
+### How to run
 
-In 'examples/linear_regression_experiment/mnist_data' I have uploaded a file in which the MIRACLE algorithm is hardcoded 
-for a linear regression model. The model consists of 7840 parameters, and is trained on the MNIST dataset. The uncompressed 
-model has an accuracy of 0.925. In the 'out/compression' folder there are two compressions of this model. The 
-'trainp_bits10_block15_hash1.mrcl' file has a size of 658 bytes, and after decompression it scores an accuracy of 0.893.
-The 'trainp_bits30_block15_hash1.mrcl' has a size of 332 bytes, and after decompression it scores an accuracy of 0.86
+The library exposes 7 functions which should be called in the following order:
 
-The 'run_miracle' script can be used to load these models or to train and compress your own model by tweaking the 
-hyperparameters.
+1. __create_variable__: Takes a shape as input and returns a tensorflow tensor that can be used to build your Neural Networks. The user can specify a hash group size i that will reduce the compressed size of this layer by a factor of i, but it will affect performance (very hard in some cases.)
+2. __create_compression_graph__: This is where the magic of the library happens. This creates the compression, training, and loading graphs. This method should be called after finishing creating the variables. It takes as arguments the user defined loss and the final size of the compressed file in bits (for people who know what they're doing they can also specify the nr of variables in a block and the number of bits used to compress a block).
+3. __assign_session__: After creating a TensorFlow session you should use this method to assign the session to the miracle graph. This method exists in order to hide some complexities from the user.
+4. __pretrain__: Trains to minimize the loss. Takes as argument the number of iterations and optionally a function f:int->unit that will be executed after every iteration (I use it for printing).
+5. __train__: Trains to minimize the loss and also takes into account the KL difference between the trained graph and the prior. Should be run until both the accurarcy and the Mean KL converge.
+6. __compress__: Compresses the graph and outputs it to a file. Takes as argument the path file and the number of time we retrain the graph after compressing a block (recomment 10-100).
+7. __load__: Loads the graph from a file. Still requires a session to have been assigned to the graph in the same session. Does not require the function 4 to 6 to have been called in the same session.
+
+
+
+### Examples
+
+An example of a graph can be seen in examples/miracle_graphs/mnist/feed_forward.py. This builds a linear regression model for MNIST. The model contains 7850 variables, and uncompressed it has a permormance of 92%. Under out/compressed_files there are two compressed model, one of 663 bytes that has an accuracy of 91.5%, and one of 336 bytes that has an accuracy of 89.7%.
