@@ -31,6 +31,8 @@ class MiracleGraph(object):
             Seed used for seeding numpy. Needed for the compression.
             Decompression has to be made with the same numpy seed
         """
+        # Keep a name counter for variables. Used to name variables
+        self.variable_count = 0
         self.log_initial_sigma = log_initial_sigma
         self.log_p_initial_sigma = log_p_initial_sigma
         self.train_p_scale = train_p_scale
@@ -47,7 +49,7 @@ class MiracleGraph(object):
 
         np.random.seed(seed)
 
-    def create_variable(self, shape, hash_group_size=1, scale=None):
+    def create_variable(self, shape, hash_group_size=1, scale=None, name=None):
         """
         Create a tensorflow variable where each parameter is a Gaussian.
 
@@ -67,44 +69,47 @@ class MiracleGraph(object):
         if scale is None:
             # The bigger the layer, the smaller the standard deviation.
             scale = np.sqrt(1 / np.prod(shape[:-1]))
+        if name is None:
+            name = "variable_{}".format(self.variable_count)
+            self.variable_count += 1
+        with tf.name_scope(name):
+            nr_hashed_vars = np.prod(shape) // hash_group_size  # this * hash_group_size = nr of vars hashed
+            nr_leftover_vars = np.prod(shape) % hash_group_size  # leftover bc it doesn't divide perfectly
+            nr_trained_vars = nr_hashed_vars + nr_leftover_vars
+            logging.info("Creating variable of shape {} with hash size {}".format(shape, hash_group_size))
+            with tf.name_scope('mu'):
+                # Create the mean for each var in the layer. The sampling stdev is scaled by first dim so that
+                # Bigger layers are initialized closer to 0.
+                mu_init = np.random.normal(size=nr_trained_vars, scale=scale)
+                mu = tf.Variable(mu_init, dtype=self.dtype, name='mu')
 
-        nr_hashed_vars = np.prod(shape) // hash_group_size  # this * hash_group_size = nr of vars hashed
-        nr_leftover_vars = np.prod(shape) % hash_group_size  # leftover bc it doesn't divide perfectly
-        nr_trained_vars = nr_hashed_vars + nr_leftover_vars
-        logging.info("Creating variable of shape {} with hash size {}".format(shape, hash_group_size))
-        with tf.name_scope('mu'):
-            # Create the mean for each var in the layer. The sampling stdev is scaled by first dim so that
-            # Bigger layers are initialized closer to 0.
-            mu_init = np.random.normal(size=nr_trained_vars, scale=scale)
-            mu = tf.Variable(mu_init, dtype=self.dtype, name='mu')
+            with tf.name_scope('sigma'):
+                sigma_init = tf.fill([nr_trained_vars], tf.cast(self.log_initial_sigma, dtype=self.dtype),
+                                     name='sigma_init')
+                # We use log sigma as a Variable because we want sigma to always be positive
+                sigma_var = tf.Variable(sigma_init, name='sigma_var')
+                sigma = tf.exp(sigma_var)
 
-        with tf.name_scope('sigma'):
-            sigma_init = tf.fill([nr_trained_vars], tf.cast(self.log_initial_sigma, dtype=self.dtype),
-                                 name='sigma_init')
-            # We use log sigma as a Variable because we want sigma to always be positive
-            sigma_var = tf.Variable(sigma_init, name='sigma_var')
-            sigma = tf.exp(sigma_var)
+            with tf.name_scope('weights'):
+                # Applly the reparametrization trick to get the weights
+                epsilon = tf.random_normal([nr_trained_vars], name='epsilon')  # expensive
+                weights = mu + epsilon * sigma
 
-        with tf.name_scope('weights'):
-            # Applly the reparametrization trick to get the weights
-            epsilon = tf.random_normal([nr_trained_vars], name='epsilon')  # expensive
-            weights = mu + epsilon * sigma
+            with tf.name_scope('fixed_weights'):
+                # Define a set of fixed weights which we'll use one we compress a variable.
+                # This allows for training uncompressed blocks whilst keeping compressed blocks steady
+                fixed_weights = tf.Variable(tf.zeros_like(weights), trainable=False, name="fixed_weights")
+                # Create the uncompressed mask which allows us to make the choice between the fixed and variational weights
+                layer_uncompressed_mask = tf.Variable(tf.ones_like(weights), trainable=False,
+                                                      name='uncompressed_mssk')
 
-        with tf.name_scope('fixed_weights'):
-            # Define a set of fixed weights which we'll use one we compress a variable.
-            # This allows for training uncompressed blocks whilst keeping compressed blocks steady
-            fixed_weights = tf.Variable(tf.zeros_like(weights), trainable=False, name="fixed_weights")
-            # Create the uncompressed mask which allows us to make the choice between the fixed and variational weights
-            layer_uncompressed_mask = tf.Variable(tf.ones_like(weights), trainable=False,
-                                                  name='uncompressed_mssk')
+            with tf.name_scope("combined_weights"):
+                combined_weights = layer_uncompressed_mask * weights + (
+                        1 - layer_uncompressed_mask) * fixed_weights
 
-        with tf.name_scope("combined_weights"):
-            combined_weights = layer_uncompressed_mask * weights + (
-                    1 - layer_uncompressed_mask) * fixed_weights
-
-        with tf.name_scope('expand_weights'):
-            # Expand the hashed weights and put them in the corresponding shape
-            expanded_weights = mgu.expand_variable(combined_weights, shape, nr_hashed_vars, hash_group_size)
+            with tf.name_scope('expand_weights'):
+                # Expand the hashed weights and put them in the corresponding shape
+                expanded_weights = mgu.expand_variable(combined_weights, shape, nr_hashed_vars, hash_group_size)
 
         # Keep track of the actual weights, as they will be used to define the KL loss and during compression
         self.variables.append((mu, sigma))
