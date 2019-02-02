@@ -1,4 +1,4 @@
-"""Define a miracle graph in which we create the layers"""
+"""Define a miracle graph in which we create the variables"""
 import logging
 
 import numpy as np
@@ -12,10 +12,10 @@ STDDEV_THRESHOLD = 0.1
 
 
 class MiracleGraph(object):
-    def __init__(self, log_initial_sigma=1e-10, log_p_initial_sigma=1e-2, train_p_scale=True,
+    def __init__(self, log_initial_sigma=-10, log_p_initial_sigma=-2, train_p_scale=True,
                  dtype=tf.float32, seed=53):
         """
-        Define the graph we'll use for constructing the miracle layers
+        Define the graph we'll use for constructing the miracle variables
 
         Parameters
         ----------
@@ -24,7 +24,7 @@ class MiracleGraph(object):
         log_p_initial_sigma: int
              Natural logarithm of the standard dev we want to initialize the prior variables with.
         train_p_scale: bool
-            Whether we train the standard dev of the layers. Recommended to leave as default.
+            Whether we train the standard dev of the variables. Recommended to leave as default.
         dtype: tf.DType
             The default dtype we'll use for our floats.
         seed: int
@@ -37,15 +37,15 @@ class MiracleGraph(object):
         self.log_p_initial_sigma = log_p_initial_sigma
         self.train_p_scale = train_p_scale
         self.dtype = dtype
-        # Define a lsit used to accumulate all the parameters so that we can block them when doing the KL loss
+        # Define a list used to accumulate all the parameters so that we can block them when doing the KL loss
         self.variables = list()
-        # Accumulate the fixed weights and the uncompressed masks for each layer.
+        # Accumulate the fixed weights and the uncompressed masks for each variable.
         # Each entry has the format (new_fixed_weight, new_mask)
-        self.layers_fw_um = list()
-        # Define a list that accumulates the p_scale for each layer
+        self.variables_fw_um = list()
+        # Define a list that accumulates the p_scale for each variable
         self.p_scale_vars = list()
-        # Define list that accumulates the number of actual standing vars in each layer after hashing
-        self.hashed_layer_sizes = list()
+        # Define list that accumulates the number of actual standing vars in each variable after hashing
+        self.hashed_variable_sizes = list()
 
         np.random.seed(seed)
 
@@ -67,7 +67,7 @@ class MiracleGraph(object):
 
         """
         if scale is None:
-            # The bigger the layer, the smaller the standard deviation.
+            # The bigger the variable, the smaller the standard deviation.
             scale = np.sqrt(1 / np.prod(shape[:-1]))
         if name is None:
             name = "variable_{}".format(self.variable_count)
@@ -78,8 +78,8 @@ class MiracleGraph(object):
             nr_trained_vars = nr_hashed_vars + nr_leftover_vars
             logging.info("Creating variable of shape {} with hash size {}".format(shape, hash_group_size))
             with tf.name_scope('mu'):
-                # Create the mean for each var in the layer. The sampling stdev is scaled by first dim so that
-                # Bigger layers are initialized closer to 0.
+                # Create the mean for each var in the variable. The sampling stdev is scaled by first dim so that
+                # Bigger variables are initialized closer to 0.
                 mu_init = np.random.normal(size=nr_trained_vars, scale=scale)
                 mu = tf.Variable(mu_init, dtype=self.dtype, name='mu')
 
@@ -100,12 +100,12 @@ class MiracleGraph(object):
                 # This allows for training uncompressed blocks whilst keeping compressed blocks steady
                 fixed_weights = tf.Variable(tf.zeros_like(weights), trainable=False, name="fixed_weights")
                 # Create the uncompressed mask which allows us to make the choice between the fixed and variational weights
-                layer_uncompressed_mask = tf.Variable(tf.ones_like(weights), trainable=False,
+                variable_uncompressed_mask = tf.Variable(tf.ones_like(weights), trainable=False,
                                                       name='uncompressed_mssk')
 
             with tf.name_scope("combined_weights"):
-                combined_weights = layer_uncompressed_mask * weights + (
-                        1 - layer_uncompressed_mask) * fixed_weights
+                combined_weights = variable_uncompressed_mask * weights + (
+                        1 - variable_uncompressed_mask) * fixed_weights
 
             with tf.name_scope('expand_weights'):
                 # Expand the hashed weights and put them in the corresponding shape
@@ -113,11 +113,11 @@ class MiracleGraph(object):
 
         # Keep track of the actual weights, as they will be used to define the KL loss and during compression
         self.variables.append((mu, sigma))
-        self.layers_fw_um.append((fixed_weights, layer_uncompressed_mask))
-        # Create the prior scale for this layer
+        self.variables_fw_um.append((fixed_weights, variable_uncompressed_mask))
+        # Create the prior scale for this variable
         p_scale_var = tf.Variable(self.log_p_initial_sigma, dtype=self.dtype, trainable=self.train_p_scale)
         self.p_scale_vars.append(p_scale_var)
-        self.hashed_layer_sizes.append(nr_trained_vars)
+        self.hashed_variable_sizes.append(nr_trained_vars)
 
         return expanded_weights
 
@@ -171,8 +171,8 @@ class MiracleGraph(object):
 
     def _create_graph_parameters(self, compressed_size_bytes, block_size_vars, bits_per_block):
         """Create variables that will help in defining the graph"""
-        self.nr_layers = len(self.hashed_layer_sizes)
-        self.nr_actual_vars = sum(self.hashed_layer_sizes)
+        self.nr_variables = len(self.hashed_variable_sizes)
+        self.nr_actual_vars = sum(self.hashed_variable_sizes)
         self.block_size_vars, self.bits_per_block = mgu.parse_compressed_size(compressed_size_bytes,
                                                                               self.nr_actual_vars,
                                                                               block_size_vars,
@@ -188,13 +188,13 @@ class MiracleGraph(object):
         self.permutation = np.random.permutation(self.nr_train_vars)
         # Get the inverse of the permutation. Used to rearrange the created variables into the desired shape.
         self.permutation_inv = np.argsort(self.permutation)
-        logging.info("\n\tUsing {nr_layers} layers\n"
+        logging.info("\n\tUsing {nr_variables} variables\n"
                      "\tNumber of actual variables {nr_actual_vars}\n"
                      "\tNumber of trained variables {nr_trained_vars}\n"
                      "\tBlock size {block_size_vars}, Bits per block {bits_per_block}\n"
                      "\tKL target {kl_target}\n"
                      "\tAccumulated Blocks Shape {accb_shape}".format(
-            nr_layers=self.nr_layers, nr_actual_vars=self.nr_actual_vars, nr_trained_vars=self.nr_train_vars,
+            nr_variables=self.nr_variables, nr_actual_vars=self.nr_actual_vars, nr_trained_vars=self.nr_train_vars,
             block_size_vars=self.block_size_vars, bits_per_block=self.bits_per_block, kl_target=self.kl_target,
             accb_shape=self.accb_shape))
 
@@ -234,19 +234,19 @@ class MiracleGraph(object):
 
     def _create_p_scale(self):
         """
-        Since in a block we have parameters from multiple layers, we need to find a way to relate back to those
-        when doing the kl divergence. To do that we'll first create a mapping from elements in self.mu to which layer
+        Since in a block we have parameters from multiple variables, we need to find a way to relate back to those
+        when doing the kl divergence. To do that we'll first create a mapping from elements in self.mu to which variable
         they were in. Then we'll reshape this array in accb shape and make its elements be the actual scale of the
-        layers
+        variables
         """
-        # Create and extra layer which would contain the variables created for padding
-        extra_layer = tf.Variable(self.log_p_initial_sigma, dtype=self.dtype, trainable=self.train_p_scale)
-        p_scale_vars = tf.stack(self.p_scale_vars + [extra_layer], axis=0)
+        # Create and extra variable which would contain the variables created for padding
+        extra_variable = tf.Variable(self.log_p_initial_sigma, dtype=self.dtype, trainable=self.train_p_scale)
+        p_scale_vars = tf.stack(self.p_scale_vars + [extra_variable], axis=0)
         p_scale = tf.exp(p_scale_vars)  # apply the exponent so that we get the actual scale
-        # Define the mapping from variables to which layer they are
-        # This function outputs 000111122 if 1st layer has 3 variables, second layer has 4, and out padding size is 2
-        p_scale_permutation = np.repeat(range(self.nr_layers + 1),
-                                        self.hashed_layer_sizes + [self.nr_train_vars - self.nr_actual_vars])
+        # Define the mapping from variables to which variable they are
+        # This function outputs 000111122 if 1st variable has 3 variables, second variable has 4, and out padding size is 2
+        p_scale_permutation = np.repeat(range(self.nr_variables + 1),
+                                        self.hashed_variable_sizes + [self.nr_train_vars - self.nr_actual_vars])
         p_scale_permutation = p_scale_permutation[self.permutation]  # apply the actual permutation to get the mapping
         permuted_p_scale = tf.gather(p_scale, p_scale_permutation)  # Apply the mapping to our p_scale
         # Reshape to accb shape
@@ -255,7 +255,7 @@ class MiracleGraph(object):
     def _initialize_kl_loss(self, initial_kl_penalty, kl_penalty_step):
         logging.info("Initializing KL loss with initial KL penalty {0}, KL penalty step {1}".format(initial_kl_penalty,
                                                                                                     kl_penalty_step))
-        logging.info("Creating KL loss for {} layers".format(len(self.variables)))
+        logging.info("Creating KL loss for {} variables".format(len(self.variables)))
         # Define the prior distribution and the variational distribution
         w_dist = tf.contrib.distributions.Normal(loc=self.mu, scale=self.sigma)
         p = tf.contrib.distributions.Normal(loc=0., scale=self.p_scale)
@@ -265,8 +265,8 @@ class MiracleGraph(object):
         self.block_kl = tf.reduce_sum(total_kl, axis=1)
         self.mean_kl = tf.reduce_mean(self.block_kl)  # used for logging purposes
 
-        # Define a variable that keeps track of which layers are compressed.
-        # This is redundant; can be inferred from layer_uncompressed_masks. Created because the code is simpler
+        # Define a variable that keeps track of which variables are compressed.
+        # This is redundant; can be inferred from variable_uncompressed_masks. Created because the code is simpler
         self.block_uncompressed_mask = tf.Variable(tf.ones(shape=self.nr_blocks), trainable=False)
         # Define variable that allows us to control whether we want to enable the loss or not
         self.enable_kl_loss = tf.Variable(1., dtype=self.dtype, trainable=False)
@@ -296,9 +296,9 @@ class MiracleGraph(object):
             # Use the Adam Optimizer with default parameters:
             optimizer = tf.train.AdamOptimizer()
 
-        self.train_op = optimizer.minimize(self.total_loss)
+        self.train_op = optimizer.minimize(self.total_loss, global_step=tf.train.get_or_create_global_step())
 
-        # Define train operation that does not train the layer p scales.
+        # Define train operation that does not train the variable p scales.
         # This is used after during retraining after beginning compression.
         no_pscales_list = [v for v in tf.trainable_variables() if v not in self.p_scale_vars]
         self.train_op_no_pscales = optimizer.minimize(self.total_loss, var_list=no_pscales_list)
@@ -354,7 +354,7 @@ class MiracleGraph(object):
 
     def _create_intermediate_fw_um(self):
         logging.info("Creating intermediate fixed weights and uncompressed mask")
-        # Update the fixed weights and the layer masks. We will use an intermediate variable which we'll update,
+        # Update the fixed weights and the variable masks. We will use an intermediate variable which we'll update,
         # and then we update the original (given to the user) fixed weights and uncompressed masks.
 
         # Create a fixed weight variable that will replesent all the fixed weights concatenated.
@@ -377,17 +377,17 @@ class MiracleGraph(object):
             # Create the graph that maps these variables back the the original ones. This is done by splitting them
             # And then using the assign operations given by the original ones.
             split_fw = tf.split(restored_concat_fixed_weights,
-                                self.hashed_layer_sizes + [
-                                    self.nr_train_vars - self.nr_actual_vars])  # all layers + the padded layer
+                                self.hashed_variable_sizes + [
+                                    self.nr_train_vars - self.nr_actual_vars])  # all variables + the padded variable
             split_um = tf.split(restored_concat_uncompressed_masks,
-                                self.hashed_layer_sizes + [
-                                    self.nr_train_vars - self.nr_actual_vars])  # all layers + the padded layer
+                                self.hashed_variable_sizes + [
+                                    self.nr_train_vars - self.nr_actual_vars])  # all variables + the padded variable
             logging.info("Create copying graph to copy intermediate weights into the original ones")
             self.copy_ops = list()
-            for layer_index in range(self.nr_layers):
-                original_fixed_weights, original_uncompressed_mask = self.layers_fw_um[layer_index]
-                copied_fw = split_fw[layer_index]
-                copied_um = split_um[layer_index]
+            for variable_index in range(self.nr_variables):
+                original_fixed_weights, original_uncompressed_mask = self.variables_fw_um[variable_index]
+                copied_fw = split_fw[variable_index]
+                copied_um = split_um[variable_index]
 
                 fw_copy_op = original_fixed_weights.assign(copied_fw)
                 um_copy_op = original_uncompressed_mask.assign(copied_um)
@@ -504,7 +504,7 @@ class MiracleGraph(object):
     def _create_loader_graph(self):
         """Create the graph for loading the compressed model"""
         # Create the graph to load the scales of the graph
-        self.loaded_p_scale_vars = tf.placeholder(self.dtype, shape=[self.nr_layers])
+        self.loaded_p_scale_vars = tf.placeholder(self.dtype, shape=[self.nr_variables])
         split_p_scale_vars = tf.unstack(self.loaded_p_scale_vars)
         self.load_p_scale = list()
         for loaded_p_scale_var, p_scale_var in zip(split_p_scale_vars, self.p_scale_vars):
@@ -543,7 +543,7 @@ class MiracleGraph(object):
         """
         print('Loading model from {}'.format(model_file))
         p_scale_vars, seeds = load_from_file(model_file, bits_per_block=self.bits_per_block,
-                                             p_scale_number=self.nr_layers, seeds_number=self.nr_blocks)
+                                             p_scale_number=self.nr_variables, seeds_number=self.nr_blocks)
         self.sess.run(self.load_p_scale, feed_dict={self.loaded_p_scale_vars: p_scale_vars})
 
         for block_index, block_seed in enumerate(seeds):

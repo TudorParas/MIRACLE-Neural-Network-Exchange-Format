@@ -1,21 +1,22 @@
 import logging
 
 import tensorflow as tf
+import numpy as np
 
 import miracle
 from examples.miracle_graphs.LeNet5.mnist_data import MnistData, LABEL_SIZE
 
 logging.getLogger().setLevel(logging.INFO)
 
-SUMMARIES_DIR = 'out/graphs/mnist_miracle'
-COMPRESSED_FILES_DIR = 'out/compressed_files'
+SUMMARIES_DIR = 'out/graphs/mnist_miracle/no_opt'
+COMPRESSED_FILES_DIR = 'out/compressed_files/miracle'
 
 BATCH_SIZE = 256
 BLOCK_SIZE_VARS = 30
 BITS_PER_BLOCK = 10
 
-PRETRAIN_ITERATIONS = 20000
-TRAIN_ITERATIONS = 20000
+PRETRAIN_ITERATIONS = 10000
+TRAIN_ITERATIONS = 70000
 RETRAIN_ITERATIONS = 100
 
 COMPRESSED_FILE_NAME = 'lenet5_{0}_{1}.mrcl'.format(BLOCK_SIZE_VARS, BITS_PER_BLOCK)
@@ -90,13 +91,13 @@ with tf.name_scope('Lenet5'):
     # Define loss and optimizer
     loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=y))
 
-    global_step = tf.Variable(initial_value=0, name='global_step', trainable=False)
+    global_step = tf.train.get_or_create_global_step()
 
     learning_rate = tf.train.exponential_decay(
-        0.001,  # Base learning rate.
-        global_step,  # Current index into the dataset.
-        30 * dataset.train_data[0].shape[0] / BATCH_SIZE,  # Decay step, once every 30 epochs
-        1.,  # Decay rate.
+        learning_rate=0.001,  # Base learning rate.
+        global_step=global_step,  # Current index into the dataset.
+        decay_steps=30 * dataset.train_data[0].shape[0] / BATCH_SIZE,  # Decay step, once every 30 epochs
+        decay_rate=1.,  # Decay rate.
         staircase=True)
 
     optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
@@ -108,11 +109,18 @@ miracle.create_compression_graph(loss=loss, optimizer=optimizer,
 with tf.Session() as sess:
     # Def print operations to output during training
     def print_train(iteration):
-        """Print the accuracy once every 1000 iterations"""
+        """Execute this after every iteration iterations"""
         if iteration % 500 == 0:
-            acc, mean_kl = sess.run([accuracy, miracle.graph.mean_kl])
-            print("Iteration {0}, Train Accuracy {1}, Mean KL {2}".format(iteration, acc, mean_kl))
+            acc, current_loss, kl_loss, mean_kl, kl_target = sess.run([accuracy, loss, miracle.graph.kl_loss,
+                                                                       miracle.graph.mean_kl, miracle.graph.kl_target])
+            print("\nIteration {0}, Train Accuracy {1}, Loss {2}, KL loss {3}, Mean KL_2 {4}".format(
+                iteration, acc, current_loss, kl_loss, mean_kl / np.log(2.), kl_target))
+            # y_ev, pred_ev = sess.run([y, prediction])
+            # print("Labels {}\nPredictions {}".format(y_ev[0], pred_ev[0]))
 
+            # mu, sigma = miracle.graph.variables[0]
+            # print("MU: {}".format(sess.run(mu)[:10]))
+            # print("Sigma: {}".format(sess.run(sigma[:10])))
 
     def print_retrain():
         """Print the accuracy after every iteration"""
@@ -125,13 +133,14 @@ with tf.Session() as sess:
 
     miracle.assign_session(sess)
 
-    miracle.pretrain(iterations=PRETRAIN_ITERATIONS, f=print_train)
-    miracle.train(iterations=TRAIN_ITERATIONS, f=print_train)
-    miracle.compress(retrain_iterations=RETRAIN_ITERATIONS, out_file=COMPRESSED_FILE_PATH, f=print_retrain)
-
     merged = tf.summary.merge_all()
     train_writer = tf.summary.FileWriter(SUMMARIES_DIR, sess.graph)
 
+    # miracle.pretrain(iterations=PRETRAIN_ITERATIONS, f=print_train)
+    # miracle.train(iterations=TRAIN_ITERATIONS, f=print_train)
+    # miracle.compress(retrain_iterations=RETRAIN_ITERATIONS, out_file=COMPRESSED_FILE_PATH, f=print_retrain)
+
+    miracle.load(COMPRESSED_FILE_PATH)
     dataset.initialize_test_data(sess)
 
     print("Final accuracy on test: {}".format(sess.run(accuracy)))

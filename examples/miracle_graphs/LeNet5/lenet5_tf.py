@@ -79,18 +79,19 @@ with tf.name_scope('Lenet5'):
     # Define loss and optimizer
     loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=y))
 
-    global_step = tf.Variable(initial_value=0, name='global_step', trainable=False)
+    global_step = tf.train.get_or_create_global_step()
 
     learning_rate = tf.train.exponential_decay(
-        0.001,  # Base learning rate.
-        global_step,  # Current index into the dataset.
-        30 * dataset.train_data[0].shape[0] / BATCH_SIZE,  # Decay step, once every 30 epochs
-        1.,  # Decay rate.
+        learning_rate=0.01,  # Base learning rate.
+        global_step=global_step,  # Current index into the dataset.
+        decay_steps=20 * dataset.train_data[0].shape[0] / BATCH_SIZE,  # Decay step, once every 30 epochs
+        decay_rate=0.97,  # Decay rate.
         staircase=True)
 
     optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
 
-    train_op = optimizer.minimize(loss)
+with tf.name_scope('training'):
+    train_op = optimizer.minimize(loss, global_step=tf.train.get_or_create_global_step())
 
 with tf.Session() as sess:
     # Def print operations to output during training
@@ -102,8 +103,9 @@ with tf.Session() as sess:
         sess.run(train_op)
 
         if iteration % 500 == 0:
-            acc = sess.run(accuracy)
-            print("Iteration {0}, Train Accuracy {1}".format(iteration, acc))
+            acc, current_loss = sess.run([accuracy, loss])
+            print("Iteration {0}, Train Accuracy {1}, Loss {2}".format(iteration, acc, current_loss))
+            # print(sess.run([learning_rate, global_step]))
 
     merged = tf.summary.merge_all()
     train_writer = tf.summary.FileWriter(SUMMARIES_DIR, sess.graph)
