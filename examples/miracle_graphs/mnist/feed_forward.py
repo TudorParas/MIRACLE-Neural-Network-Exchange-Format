@@ -11,7 +11,7 @@ SUMMARIES_DIR = 'out/mnist_feed_forward'
 COMPRESSED_FILES_DIR = 'out/compressed_files'
 
 BATCH_SIZE = 128
-HASH_GROUP_SIZE = 2
+HASH_GROUP_SIZE = 1
 BLOCK_SIZE_VARS = 30
 BITS_PER_BLOCK = 10
 
