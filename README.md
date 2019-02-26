@@ -22,4 +22,6 @@ The library exposes 7 functions which should be called in the following order:
 
 ### Examples
 
-An example of a graph can be seen in examples/miracle_graphs/mnist/feed_forward.py. This builds a linear regression model for MNIST. The model contains 7850 variables, and uncompressed it has a permormance of 92%. Under out/compressed_files there are two compressed model, one of 663 bytes that has an accuracy of 91.5%, and one of 336 bytes that has an accuracy of 89.7%.
+The main evaluation has been done on LeNet5-caffe. This can be found in examples/miracle_graphs/mnist/LeNet5/graphs/lenet5_miracle.py. It achieves a compression rate of 1000x with an accuracy of 99.17%. It also achieves a compression rate of 1500x with an accuracy of 99.02%. These compressed files have been uploaded and can be tested by the user.
+
+The compression rates have been calculated assuming that the 431k variables occupy 4 bytes each.

@@ -82,10 +82,10 @@ with tf.name_scope('Lenet5'):
     global_step = tf.train.get_or_create_global_step()
 
     learning_rate = tf.train.exponential_decay(
-        learning_rate=0.01,  # Base learning rate.
+        learning_rate=0.001,  # Base learning rate.
         global_step=global_step,  # Current index into the dataset.
         decay_steps=20 * dataset.train_data[0].shape[0] / BATCH_SIZE,  # Decay step, once every 30 epochs
-        decay_rate=0.97,  # Decay rate.
+        decay_rate=1.,  # Decay rate.
         staircase=True)
 
     optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
@@ -101,11 +101,15 @@ with tf.Session() as sess:
 
     for iteration in range(TRAIN_ITERATIONS):
         sess.run(train_op)
-
         if iteration % 500 == 0:
             acc, current_loss = sess.run([accuracy, loss])
             print("Iteration {0}, Train Accuracy {1}, Loss {2}".format(iteration, acc, current_loss))
-            # print(sess.run([learning_rate, global_step]))
+            dataset.initialize_test_data(sess)
+
+            acc_tst = sess.run(accuracy)
+            print("Accuracy on test: {}\n".format(acc_tst))
+
+            dataset.initialize_train_data(sess, BATCH_SIZE)
 
     merged = tf.summary.merge_all()
     train_writer = tf.summary.FileWriter(SUMMARIES_DIR, sess.graph)

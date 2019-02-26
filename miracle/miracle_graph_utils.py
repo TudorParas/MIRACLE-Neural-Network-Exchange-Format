@@ -33,7 +33,7 @@ def parse_compressed_size(compressed_size_bytes, nr_actual_vars, block_size_vars
         bits_per_block = np.ceil(compressed_size_bits / nr_total_blocks)
     else:
         if bits_per_block is None:
-            bits_per_block = 12
+            bits_per_block = 10
         nr_total_blocks = np.ceil(compressed_size_bits / bits_per_block)
         block_size_vars = np.ceil(nr_actual_vars / nr_total_blocks)
 

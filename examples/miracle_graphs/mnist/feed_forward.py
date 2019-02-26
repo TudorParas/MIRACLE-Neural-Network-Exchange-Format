@@ -15,7 +15,7 @@ HASH_GROUP_SIZE = 1
 BLOCK_SIZE_VARS = 30
 BITS_PER_BLOCK = 10
 
-COMPRESSED_FILE_NAME = 'mnist_{0}_{1}_{2}.mrcl'.format(BLOCK_SIZE_VARS, BITS_PER_BLOCK, HASH_GROUP_SIZE)
+COMPRESSED_FILE_NAME = 'compr.mrcl'#'mnist_{0}_{1}_{2}.mrcl'.format(BLOCK_SIZE_VARS, BITS_PER_BLOCK, HASH_GROUP_SIZE)
 COMPRESSED_FILE_PATH = '{}/{}'.format(COMPRESSED_FILES_DIR, COMPRESSED_FILE_NAME)
 
 dataset = MnistData()
@@ -37,7 +37,7 @@ with tf.name_scope('accuracy'):
 with tf.name_scope('Loss'):
     loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(logits=logits, labels=y))
 
-miracle.create_compression_graph(loss, block_size_vars=BLOCK_SIZE_VARS, bits_per_block=BITS_PER_BLOCK)
+miracle.create_compression_graph(loss, compressed_size_bytes=336)
 
 sess = tf.Session()
 sess.run(tf.global_variables_initializer())
