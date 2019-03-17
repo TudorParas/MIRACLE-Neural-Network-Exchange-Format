@@ -406,7 +406,7 @@ class MiracleGraph(object):
         """
         self.sess = tensorflow_session
 
-    def pretrain(self, iterations, f=None):
+    def pretrain(self, iterations, f=None, feed_dict=None):
         """Pretrain, without enforcing kl loss
 
         Parameters
@@ -416,7 +416,7 @@ class MiracleGraph(object):
         f: int -> unit
             function defined by user that takes as arg the current iteration number. This is in order to allow the
             user to make print statements during execution
-
+        feed_dict: dict
         """
         logging.info("Strating pretraining for {0} iterations".format(iterations))
 
@@ -425,12 +425,12 @@ class MiracleGraph(object):
 
         self.sess.run(self.enable_kl_loss.assign(0.))
         for iteration in range(iterations):
-            self.sess.run(self.train_op)
+            self.sess.run(self.train_op, feed_dict=feed_dict)
             f(iteration)
 
         print("Finished pretraining with: Loss {0}".format(self.sess.run(self.total_loss)))
 
-    def train(self, iterations, f=None):
+    def train(self, iterations, f=None, feed_dict=None):
         """Train until the kl converges at a value smaller than the target kl
 
         Parameters
@@ -440,6 +440,7 @@ class MiracleGraph(object):
         f: int -> unit
             function defined by user that takes as arg the current iteration number. This is in order to allow the
             user to make print statements during execution
+        feed_dict: dict
         """
         # ToDo train until mean kl and accuracy convergence.
         if f is None:
@@ -448,12 +449,25 @@ class MiracleGraph(object):
         self.sess.run(self.enable_kl_loss.assign(1.))
         # with tf.control_dependencies([self.train_op]):
         #     kl_penalty_update = tf.identity(self.kl_penalty_update)
-        total_loss, mean_kl = self.sess.run([self.total_loss, self.mean_kl])
+        total_loss, mean_kl = self.sess.run([self.total_loss, self.mean_kl], feed_dict=feed_dict)
         logging.info("Starting training with Total Loss--{0}, Mean KL--{1}".format(total_loss, mean_kl))
         for iteration in range(iterations):
             # Train until convergence of mean KL
-            self.sess.run([self.train_op, self.kl_penalty_update])
+            self.sess.run([self.train_op, self.kl_penalty_update], feed_dict=feed_dict)
             f(iteration)
+
+    def run_pretrain_op(self, feed_dict=None):
+        """Pretrain, without enforcing kl loss
+        """
+        self.sess.run(self.enable_kl_loss.assign(0.))
+        self.sess.run(self.train_op, feed_dict=feed_dict)
+
+    def run_train_op(self, feed_dict=None):
+        """
+        Run one step of the training operation.
+        """
+        self.sess.run(self.enable_kl_loss.assign(1.))
+        self.sess.run([self.train_op, self.kl_penalty_update], feed_dict=feed_dict)
 
     def compress(self, retrain_iterations, out_file, f=None):
         """
