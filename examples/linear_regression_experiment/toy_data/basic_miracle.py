@@ -11,7 +11,7 @@ SLOPE = 2
 DTYPE = tf.float32
 LOG_INITIAL_SIGMA = -10.
 LOG_P_INITIAL_SIGMA = 0
-TRAIN_P_SIGMA = True
+TRAIN_P_SIGMA = False
 
 NUMPY_SEED = 2  # seed if we use a normally sampled vector
 
@@ -177,7 +177,7 @@ class BasicMiracle(object):
         # Generate a sequence of numbers sampled from a unit gaussian that we'll use to sample our prior
         nr_of_samples = np.power(2, self.compressed_size)
         sample_vector = self._get_normal_sample_vector(nr_of_samples)
-
+        print(sample_vector)
         sample_vector = tf.constant(sample_vector, dtype=DTYPE)
         # Sample p using the sample vector. This means just multiplying it by p-s stf
         self.p_sample = sample_vector * self.p_scale

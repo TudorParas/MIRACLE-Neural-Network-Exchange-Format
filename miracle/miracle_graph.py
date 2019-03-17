@@ -288,7 +288,7 @@ class MiracleGraph(object):
         self.kl_loss = tf.reduce_sum(
             self.block_kl * self.block_uncompressed_mask * self.kl_penalties) * self.enable_kl_loss
 
-    def _initialize_training_graph(self, loss, optimizer):
+    def _initialize_training_graph(self, loss, optimizer=None):
         loss = tf.cast(loss, dtype=self.dtype)
         self.total_loss = loss + self.kl_loss
 

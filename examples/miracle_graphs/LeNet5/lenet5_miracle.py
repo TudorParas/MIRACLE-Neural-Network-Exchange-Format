@@ -13,15 +13,13 @@ COMPRESSED_FILES_DIR = 'out/compressed_files/miracle'
 
 BATCH_SIZE = 256
 BLOCK_SIZE_VARS = 30
-BITS_PER_BLOCK = 10
-VERSION = 1
+BITS_PER_BLOCK = 12
 
 PRETRAIN_ITERATIONS = 10000
-TRAIN_ITERATIONS = 65000
-RETRAIN_ITERATIONS = 100
+TRAIN_ITERATIONS = 50000
+RETRAIN_ITERATIONS = 10
 
-COMPRESSED_FILE_NAME = 'lenet5_{0}_{1}_v{2}.mrcl'.format(BLOCK_SIZE_VARS, BITS_PER_BLOCK, VERSION)
-COMPRESSED_FILE_PATH = '{}/{}'.format(COMPRESSED_FILES_DIR, COMPRESSED_FILE_NAME)
+
 
 dataset = MnistData()
 
@@ -107,41 +105,52 @@ miracle.create_compression_graph(loss=loss, optimizer=optimizer,
                                  bits_per_block=BITS_PER_BLOCK,
                                  block_size_vars=BLOCK_SIZE_VARS)
 
-with tf.Session() as sess:
-    # Def print operations to output during training
-    def print_train(iteration):
-        """Execute this after every iteration iterations"""
-        if iteration % 500 == 0:
-            acc, current_loss, kl_loss, mean_kl, kl_target = sess.run([accuracy, loss, miracle.graph.kl_loss,
-                                                                       miracle.graph.mean_kl, miracle.graph.kl_target])
-            print("\nIteration {0}, Train Accuracy {1}, Loss {2}, KL loss {3}, Mean KL_2 {4}".format(
-                iteration, acc, current_loss, kl_loss, mean_kl / np.log(2.), kl_target))
-            # y_ev, pred_ev = sess.run([y, prediction])
-            # print("Labels {}\nPredictions {}".format(y_ev[0], pred_ev[0]))
-
-            # mu, sigma = miracle.graph.variables[0]
-            # print("MU: {}".format(sess.run(mu)[:10]))
-            # print("Sigma: {}".format(sess.run(sigma[:10])))
-
-    def print_retrain():
-        """Print the accuracy after every iteration"""
-        acc = sess.run(accuracy)
-        print("Train Accuracy: {}\n".format(acc))
+def run_graph(version):
+    print("Starting version {}".format(version))
+    COMPRESSED_FILE_NAME = 'lenet5_{0}_{1}_v{2}.mrcl'.format(BLOCK_SIZE_VARS, BITS_PER_BLOCK, version)
+    COMPRESSED_FILE_PATH = '{}/{}'.format(COMPRESSED_FILES_DIR, COMPRESSED_FILE_NAME)
 
 
-    sess.run(tf.global_variables_initializer())
-    dataset.initialize_train_data(sess, BATCH_SIZE)
+    with tf.Session() as sess:
+        # Def print operations to output during training
+        def print_train(iteration):
+            """Execute this after every iteration iterations"""
+            if iteration % 500 == 0:
+                acc, current_loss, kl_loss, mean_kl, kl_target = sess.run([accuracy, loss, miracle.graph.kl_loss,
+                                                                           miracle.graph.mean_kl, miracle.graph.kl_target])
+                print("\nIteration {0}, Train Accuracy {1}, Loss {2}, KL loss {3}, Mean KL_2 {4}".format(
+                    iteration, acc, current_loss, kl_loss, mean_kl / np.log(2.), kl_target))
+                # y_ev, pred_ev = sess.run([y, prediction])
+                # print("Labels {}\nPredictions {}".format(y_ev[0], pred_ev[0]))
 
-    miracle.assign_session(sess)
+                # mu, sigma = miracle.graph.variables[0]
+                # print("MU: {}".format(sess.run(mu)[:10]))
+                # print("Sigma: {}".format(sess.run(sigma[:10])))
 
-    merged = tf.summary.merge_all()
-    train_writer = tf.summary.FileWriter(SUMMARIES_DIR, sess.graph)
+        def print_retrain():
+            """Print the accuracy after every iteration"""
+            acc = sess.run(accuracy)
+            print("Train Accuracy: {}\n".format(acc))
 
-    # miracle.pretrain(iterations=PRETRAIN_ITERATIONS, f=print_train)
-    # miracle.train(iterations=TRAIN_ITERATIONS, f=print_train)
-    # miracle.compress(retrain_iterations=RETRAIN_ITERATIONS, out_file=COMPRESSED_FILE_PATH, f=print_retrain)
 
-    miracle.load(COMPRESSED_FILE_PATH)
-    dataset.initialize_test_data(sess)
+        sess.run(tf.global_variables_initializer())
+        dataset.initialize_train_data(sess, BATCH_SIZE)
 
-    print("Final accuracy on test: {}".format(sess.run(accuracy)))
+        miracle.assign_session(sess)
+
+        merged = tf.summary.merge_all()
+        train_writer = tf.summary.FileWriter(SUMMARIES_DIR, sess.graph)
+
+        # miracle.pretrain(iterations=PRETRAIN_ITERATIONS, f=print_train)
+        # miracle.train(iterations=TRAIN_ITERATIONS, f=print_train)
+        # miracle.compress(retrain_iterations=RETRAIN_ITERATIONS, out_file=COMPRESSED_FILE_PATH, f=print_retrain)
+
+        miracle.load(COMPRESSED_FILE_PATH)
+        dataset.initialize_test_data(sess)
+
+        print("Final accuracy on test: {}".format(sess.run(accuracy)))
+
+
+
+for version in range(1, 6):
+    run_graph(version)

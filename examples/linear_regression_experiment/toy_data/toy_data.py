@@ -8,7 +8,7 @@ from sklearn.model_selection import train_test_split
 RANDOM_SEED = 53
 LOWER_BOUND = -2
 UPPER_BOUND = 2
-SLOPE = 0.4
+SLOPE = 2
 
 np.random.seed(RANDOM_SEED)
 
@@ -50,8 +50,8 @@ class ToyData(object):
         fitted_line = x_axis * self.slope
 
         fig, ax = plt.subplots()
-        ax.scatter(x_axis, y_points, label='Output points', alpha=0.2)
-        ax.plot(x_axis, fitted_line, label="True line", color='r')
+        ax.scatter(x_axis, y_points, label='Data points', alpha=0.2)
+        ax.plot(x_axis, fitted_line, label="Underlying function", color='r')
         # Stylistic changes
         ax.grid(True, which='both')
 
