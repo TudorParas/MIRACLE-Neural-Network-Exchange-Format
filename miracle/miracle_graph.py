@@ -123,7 +123,7 @@ class MiracleGraph(object):
 
     def create_compression_graph(self, loss, compressed_size_bytes=None,
                                  block_size_vars=None, bits_per_block=None, optimizer=None, initial_kl_penalty=1e-08,
-                                 kl_penalty_step=1.0002):
+                                 kl_penalty_step=1.0001):
         """Create the kl loss that will be used during optimization. During this we'll also initialize the compressor.
         The create_variable function should no longer be used after calling this function.
 
@@ -306,7 +306,7 @@ class MiracleGraph(object):
     def _initialize_compressor(self):
         """Create the graph for the compression operations"""
         self.block_to_compress_index = tf.placeholder(tf.int32)
-        sample_block = tf.constant(mgu.generate_quasi_sample(self.block_size_vars, self.bits_per_block),
+        sample_block = tf.constant(mgu.generate_sample(self.block_size_vars, self.bits_per_block),
                                    dtype=self.dtype)
 
         with tf.name_scope('block_info'):
@@ -528,7 +528,7 @@ class MiracleGraph(object):
         self.loaded_block_seed = tf.placeholder(tf.int32)
 
         # Recreate the block
-        sample_block = tf.constant(mgu.generate_quasi_sample(self.block_size_vars, self.bits_per_block),
+        sample_block = tf.constant(mgu.generate_sample(self.block_size_vars, self.bits_per_block),
                                    dtype=self.dtype)
         block_p = self.p_scale[self.loaded_block_index, :]
         with tf.name_scope('p_sample'):

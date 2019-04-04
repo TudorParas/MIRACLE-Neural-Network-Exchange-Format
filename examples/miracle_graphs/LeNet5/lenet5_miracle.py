@@ -12,11 +12,11 @@ SUMMARIES_DIR = 'out/graphs/mnist_miracle/no_opt'
 COMPRESSED_FILES_DIR = 'out/compressed_files/miracle'
 
 BATCH_SIZE = 256
-BLOCK_SIZE_VARS = 40
+BLOCK_SIZE_VARS = 30
 BITS_PER_BLOCK = 10
 
-PRETRAIN_ITERATIONS = 10000
-TRAIN_ITERATIONS = 80000
+PRETRAIN_ITERATIONS = 5000
+TRAIN_ITERATIONS = 100000
 RETRAIN_ITERATIONS = 10
 
 
@@ -107,7 +107,7 @@ miracle.create_compression_graph(loss=loss, optimizer=optimizer,
 
 def run_graph(version):
     print("Starting version {}".format(version))
-    COMPRESSED_FILE_NAME = 'lenet5_{0}_{1}_v{2}.mrcl'.format(BLOCK_SIZE_VARS, BITS_PER_BLOCK, version)
+    COMPRESSED_FILE_NAME = 'lenet5_{0}_{1}_v{2}'.format(BLOCK_SIZE_VARS, BITS_PER_BLOCK, version)
     COMPRESSED_FILE_PATH = '{}/{}'.format(COMPRESSED_FILES_DIR, COMPRESSED_FILE_NAME)
 
 
@@ -139,27 +139,32 @@ def run_graph(version):
         miracle.assign_session(sess)
 
 
-        # miracle.pretrain(iterations=PRETRAIN_ITERATIONS, f=print_train)
-        # miracle.train(iterations=TRAIN_ITERATIONS, f=print_train)
+        miracle.pretrain(iterations=PRETRAIN_ITERATIONS, f=print_train)
+        miracle.train(iterations=TRAIN_ITERATIONS, f=print_train)
 
 
-        logging.info("Strating pretraining for {0} iterations".format(PRETRAIN_ITERATIONS))
-        for i in range(PRETRAIN_ITERATIONS):
-            miracle.run_pretrain_op()
-            print_train(i)
-
-        for i in range(TRAIN_ITERATIONS):
-            miracle.run_train_op(i)
-            print_train(i)
-
+        # logging.info("Strating pretraining for {0} iterations".format(PRETRAIN_ITERATIONS))
+        # for i in range(PRETRAIN_ITERATIONS):
+        #     miracle.run_pretrain_op()
+        #     print_train(i)
+        #
+        # for i in range(TRAIN_ITERATIONS):
+        #     miracle.run_train_op(i)
+        #     print_train(i)
+        #
         miracle.compress(retrain_iterations=RETRAIN_ITERATIONS, out_file=COMPRESSED_FILE_PATH, f=print_retrain)
 
         miracle.load(COMPRESSED_FILE_PATH)
         dataset.initialize_test_data(sess)
 
-        print("Final accuracy on test: {}".format(sess.run(accuracy)))
+        acc = sess.run(accuracy)
+        print("Final accuracy on test: {}".format(acc))
+        return acc
 
 
+accuracies = []
+for version in range(2, 4):
+    acc = run_graph(version)
+    accuracies.append(acc)
 
-for version in range(5, 6):
-    run_graph(version)
+print(accuracies)
