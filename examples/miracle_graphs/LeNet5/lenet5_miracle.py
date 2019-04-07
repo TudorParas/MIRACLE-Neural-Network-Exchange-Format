@@ -9,15 +9,15 @@ from examples.miracle_graphs.LeNet5.mnist_data import MnistData, LABEL_SIZE
 logging.getLogger().setLevel(logging.INFO)
 
 SUMMARIES_DIR = 'out/graphs/mnist_miracle/no_opt'
-COMPRESSED_FILES_DIR = 'out/compressed_files/miracle'
+COMPRESSED_FILES_DIR = 'out/compressed_files/miracle/hashing'
 
 BATCH_SIZE = 256
 BLOCK_SIZE_VARS = 30
 BITS_PER_BLOCK = 10
 
 PRETRAIN_ITERATIONS = 5000
-TRAIN_ITERATIONS = 100000
-RETRAIN_ITERATIONS = 10
+TRAIN_ITERATIONS = 60000
+RETRAIN_ITERATIONS = 5
 
 
 
@@ -53,7 +53,7 @@ with tf.name_scope('Lenet5'):
         logging.info("Result after maxpool 1 shape: {}".format(maxp1.shape))
 
     with tf.name_scope('convolution_2'):
-        wc2 = miracle.create_variable(shape=[5, 5, 20, 50], hash_group_size=2, name='wc2')
+        wc2 = miracle.create_variable(shape=[5, 5, 20, 50], hash_group_size=1, name='wc2')
         bc2 = miracle.create_variable(shape=[50], hash_group_size=1, name='bc2')
 
         conv2 = conv2d_help(maxp1, wc2, bc2, padding='VALID')
@@ -64,7 +64,7 @@ with tf.name_scope('Lenet5'):
         logging.info("Result after maxpool 2 shape: {}".format(maxp2.shape))
 
     with tf.name_scope('fully_connected'):
-        wd1 = miracle.create_variable(shape=[4 * 4 * 50, 500], hash_group_size=50, name='wd1')
+        wd1 = miracle.create_variable(shape=[4 * 4 * 50, 500], hash_group_size=15, name='wd1')
         bd1 = miracle.create_variable(shape=[500], hash_group_size=1, name='bd1')
 
         # Reshape maxp2 to fit the fully connected layer input
@@ -107,7 +107,7 @@ miracle.create_compression_graph(loss=loss, optimizer=optimizer,
 
 def run_graph(version):
     print("Starting version {}".format(version))
-    COMPRESSED_FILE_NAME = 'lenet5_{0}_{1}_v{2}'.format(BLOCK_SIZE_VARS, BITS_PER_BLOCK, version)
+    COMPRESSED_FILE_NAME = 'lenet5_{0}_{1}_v{2}_hash15.mrcl'.format(BLOCK_SIZE_VARS, BITS_PER_BLOCK, version)
     COMPRESSED_FILE_PATH = '{}/{}'.format(COMPRESSED_FILES_DIR, COMPRESSED_FILE_NAME)
 
 
@@ -139,20 +139,10 @@ def run_graph(version):
         miracle.assign_session(sess)
 
 
-        miracle.pretrain(iterations=PRETRAIN_ITERATIONS, f=print_train)
-        miracle.train(iterations=TRAIN_ITERATIONS, f=print_train)
-
-
-        # logging.info("Strating pretraining for {0} iterations".format(PRETRAIN_ITERATIONS))
-        # for i in range(PRETRAIN_ITERATIONS):
-        #     miracle.run_pretrain_op()
-        #     print_train(i)
+        # miracle.pretrain(iterations=PRETRAIN_ITERATIONS, f=print_train)
+        # miracle.train(iterations=TRAIN_ITERATIONS, f=print_train)
         #
-        # for i in range(TRAIN_ITERATIONS):
-        #     miracle.run_train_op(i)
-        #     print_train(i)
-        #
-        miracle.compress(retrain_iterations=RETRAIN_ITERATIONS, out_file=COMPRESSED_FILE_PATH, f=print_retrain)
+        # miracle.compress(retrain_iterations=RETRAIN_ITERATIONS, out_file=COMPRESSED_FILE_PATH, f=print_retrain)
 
         miracle.load(COMPRESSED_FILE_PATH)
         dataset.initialize_test_data(sess)
@@ -163,7 +153,7 @@ def run_graph(version):
 
 
 accuracies = []
-for version in range(2, 4):
+for version in range(1, 4):
     acc = run_graph(version)
     accuracies.append(acc)
 

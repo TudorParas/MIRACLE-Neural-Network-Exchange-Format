@@ -56,10 +56,6 @@ def expand_variable(var, shape, nr_hashed_vars, hash_group_size):
     expanded_hashed = tf.reshape(expanded_hashed, shape=[-1], name='flatten')  # flatten them
 
     expanded_vars = tf.concat([expanded_hashed, var[nr_hashed_vars:]], axis=0, name='expanded_vars')
-    # shuffle the variables
-    np.random.seed(SEED)
-    permutation = np.random.permutation(np.prod(shape))
-    expanded_vars = tf.gather(expanded_vars, permutation, name='permuted')
 
     return tf.reshape(expanded_vars, shape=shape)
 
